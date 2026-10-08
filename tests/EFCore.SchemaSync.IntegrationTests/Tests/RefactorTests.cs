@@ -143,6 +143,40 @@ public sealed class RefactorTests
     }
 
     [TestMethod]
+    public async Task A_rename_is_rejected_without_a_refactor_entry_and_accepted_with_one()
+    {
+        await using var db = await PopulatedV1Async();
+
+        // 1. The same model change without a hint is a drop-and-add on a populated table: rejected before any DDL runs.
+        var undeclared = V1 with { PhoneColumn = "PhoneNumber" };
+        var rejected = await Assert.ThrowsExactlyAsync<SchemaChangesBlockedException>(() => db.ApplyShapeAsync(undeclared));
+        Assert.AreEqual(SchemaSyncStage.Compare, rejected.Stage);
+        Assert.IsTrue(rejected.DataLossRisks.Any(r => r.Contains("[Phone]", StringComparison.Ordinal)), rejected.Message);
+        Assert.IsTrue(await db.ColumnExistsAsync("dbo.Customers", "Phone"), "the column is untouched");
+        Assert.IsFalse(await db.ColumnExistsAsync("dbo.Customers", "PhoneNumber"), "nothing was added");
+        Assert.IsFalse(await db.ObjectExistsAsync("dbo.__RefactorLog"), "no refactor bookkeeping was written");
+        Assert.AreEqual(3, await db.CountAsync("dbo.Customers"));
+
+        // 2. Declaring the previous name turns the same change into an in-place rename: accepted, rows kept.
+        var declared = undeclared with { PhoneRenamedFrom = "Phone" };
+        var accepted = await db.ApplyShapeAsync(declared);
+        Assert.AreEqual(SchemaSyncOutcome.Applied, accepted.Outcome, accepted.Describe());
+        Assert.AreEqual(0, accepted.DataLossRisks.Count);
+        Assert.IsTrue(accepted.Changes.Any(c => c.Kind == SchemaChangeKind.Rename && c.ObjectName == "[dbo].[Customers].[PhoneNumber]"), accepted.Describe());
+        Assert.IsFalse(accepted.Changes.Any(c => c.Kind is SchemaChangeKind.Alter or SchemaChangeKind.Drop or SchemaChangeKind.TableRebuild), accepted.Describe());
+        Assert.IsFalse(await db.ColumnExistsAsync("dbo.Customers", "Phone"));
+        Assert.IsTrue(await db.ColumnExistsAsync("dbo.Customers", "PhoneNumber"));
+        Assert.AreEqual(3, await db.CountAsync("dbo.Customers"));
+        Assert.AreEqual("555-0100", await db.ScalarAsync<string>("SELECT PhoneNumber FROM dbo.Customers WHERE Name = N'Ada'"));
+        Assert.AreEqual("555-0101", await db.ScalarAsync<string>("SELECT PhoneNumber FROM dbo.Customers WHERE Name = N'Grace'"));
+        Assert.AreEqual(1, await db.ScalarAsync<int>("SELECT COUNT(*) FROM dbo.__RefactorLog"));
+
+        // 3. Converged: the next start has nothing to do.
+        var again = await db.ApplyShapeAsync(declared);
+        Assert.AreEqual(SchemaSyncOutcome.NoChangesNeeded, again.Outcome, again.Describe());
+    }
+
+    [TestMethod]
     public async Task Without_a_refactor_entry_a_rename_is_a_blocked_drop()
     {
         await using var db = await PopulatedV1Async();
