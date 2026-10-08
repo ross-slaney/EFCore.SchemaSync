@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Sdk Name="Aspire.AppHost.Sdk" Version="13.6.1" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsAspireHost>true</IsAspireHost>
+    <!-- DCP and the dashboard come from NuGet so `dotnet run`/`dotnet test` work without the Aspire CLI (CI). -->
+    <AspireUseCliBundle>false</AspireUseCliBundle>
+    <NoWarn>$(NoWarn);ASPIRE010</NoWarn>
+    <UserSecretsId>schemasync-sample-apphost</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AppHost" Version="13.6.1" />
+    <PackageReference Include="Aspire.Hosting.SqlServer" Version="13.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SchemaSync.Sample\SchemaSync.Sample.csproj" />
+  </ItemGroup>
+
+</Project>

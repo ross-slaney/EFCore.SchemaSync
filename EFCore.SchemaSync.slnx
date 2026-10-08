@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/SchemaSync.Sample.AppHost/SchemaSync.Sample.AppHost.csproj" />
+    <Project Path="samples/SchemaSync.Sample/SchemaSync.Sample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/EFCore.SchemaSync/EFCore.SchemaSync.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EFCore.SchemaSync.IntegrationTests.AppHost/EFCore.SchemaSync.IntegrationTests.AppHost.csproj" />
+    <Project Path="tests/EFCore.SchemaSync.IntegrationTests/EFCore.SchemaSync.IntegrationTests.csproj" />
+    <Project Path="tests/EFCore.SchemaSync.Tests/EFCore.SchemaSync.Tests.csproj" />
+  </Folder>
+</Solution>

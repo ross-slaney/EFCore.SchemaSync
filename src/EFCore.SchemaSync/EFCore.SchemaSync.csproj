@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>EFCore.SchemaSync</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Ross Slaney</Authors>
+    <Description>Your EF model is your schema. Deploy an EF Core model directly to SQL Server with Microsoft DacFx, with one method call and no migration files.</Description>
+    <PackageTags>efcore;entity-framework;entity-framework-core;sqlserver;dacfx;dacpac;schema;database;migrations</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/ross-slaney/EFCore.SchemaSync</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ross-slaney/EFCore.SchemaSync</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReleaseNotes>https://github.com/ross-slaney/EFCore.SchemaSync/releases</PackageReleaseNotes>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <RootNamespace>EFCore.SchemaSync</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Lowest EF Core 10 patch: consumers choose the exact 10.x patch they run. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <!-- DacFx brings Microsoft.SqlServer.TransactSql.ScriptDom, used for structured script normalization. -->
+    <PackageReference Include="Microsoft.SqlServer.DacFx" Version="170.5.96" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="EFCore.SchemaSync.Tests" />
+    <InternalsVisibleTo Include="EFCore.SchemaSync.IntegrationTests" />
+  </ItemGroup>
+
+</Project>

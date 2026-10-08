@@ -1,0 +1,58 @@
+## .NET
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.cache
+*.sln.docstates
+project.lock.json
+artifacts/
+*.nupkg
+*.snupkg
+nupkg/
+
+## NuGet
+*.nuget.props
+*.nuget.targets
+
+## .NET Aspire
+.aspire/
+.apphost/
+*.dcp.yaml
+*.dcp.json
+
+## Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.sln.iml
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+## Environment
+.env
+.env.local
+.env.*.local
+
+## OS
+.DS_Store
+._*
+Thumbs.db
+
+## Logs / temp
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+## Test results
+TestResults/
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage

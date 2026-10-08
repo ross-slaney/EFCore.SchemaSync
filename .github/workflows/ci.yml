@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  ASPIRE_ALLOW_UNSECURED_TRANSPORT: "true"
+
+jobs:
+  build-and-test:
+    name: Build, test, pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      # Pre-pull so the Aspire-orchestrated container start does not count against test timeouts.
+      - name: Pull SQL Server 2022 image
+        run: docker pull mcr.microsoft.com/mssql/server:2022-latest
+        continue-on-error: true
+
+      - name: Restore
+        run: dotnet restore EFCore.SchemaSync.slnx
+
+      - name: Build
+        run: dotnet build EFCore.SchemaSync.slnx --configuration Release --no-restore
+
+      - name: Unit tests (schema conversion, no SQL Server)
+        run: >
+          dotnet test tests/EFCore.SchemaSync.Tests/EFCore.SchemaSync.Tests.csproj
+          --configuration Release --no-build
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=UnitTests.trx"
+          --results-directory TestResults
+
+      - name: Integration and end-to-end tests (Aspire + SQL Server 2022 container)
+        run: >
+          dotnet test tests/EFCore.SchemaSync.IntegrationTests/EFCore.SchemaSync.IntegrationTests.csproj
+          --configuration Release --no-build
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=IntegrationTests.trx"
+          --results-directory TestResults
+
+      - name: Pack
+        run: dotnet pack src/EFCore.SchemaSync/EFCore.SchemaSync.csproj --configuration Release --no-build --output ./nupkg
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults/**
+          if-no-files-found: ignore
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: nupkg/*

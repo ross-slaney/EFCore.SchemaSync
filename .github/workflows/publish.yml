@@ -1,0 +1,86 @@
+name: Publish to NuGet
+
+# Create a GitHub release whose tag is the package version (for example `v1.2.0` or `1.2.0`).
+# Publishing the release builds, runs the full test suite against a real SQL Server, packs with that
+# version and pushes to nuget.org using the NUGET_API_KEY repository secret.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version to publish (for example 1.2.0)
+        required: true
+        type: string
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  ASPIRE_ALLOW_UNSECURED_TRANSPORT: "true"
+
+jobs:
+  publish:
+    name: Test, pack and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve package version from the release tag
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          raw="${INPUT_VERSION:-$TAG}"
+          version="${raw#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag '$raw' is not a semantic version (expected v1.2.3 or 1.2.3[-prerelease])." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing EFCore.SchemaSync $version"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Pull SQL Server 2022 image
+        run: docker pull mcr.microsoft.com/mssql/server:2022-latest
+        continue-on-error: true
+
+      - name: Restore
+        run: dotnet restore EFCore.SchemaSync.slnx
+
+      - name: Build
+        run: dotnet build EFCore.SchemaSync.slnx --configuration Release --no-restore -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Unit tests
+        run: dotnet test tests/EFCore.SchemaSync.Tests/EFCore.SchemaSync.Tests.csproj --configuration Release --no-build --logger "console;verbosity=normal"
+
+      - name: Integration and end-to-end tests
+        run: dotnet test tests/EFCore.SchemaSync.IntegrationTests/EFCore.SchemaSync.IntegrationTests.csproj --configuration Release --no-build --logger "console;verbosity=normal"
+
+      - name: Pack
+        run: dotnet pack src/EFCore.SchemaSync/EFCore.SchemaSync.csproj --configuration Release --no-build --output ./nupkg -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Push to nuget.org
+        run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Attach package to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" ./nupkg/*.nupkg ./nupkg/*.snupkg --clobber
