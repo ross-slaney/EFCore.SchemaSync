@@ -16,4 +16,16 @@ public sealed class SchemaConversionOptions
 
     /// <summary>Package name recorded in the DACPAC. Default: the DbContext type name.</summary>
     public string? PackageName { get; set; }
+
+    /// <summary>
+    /// Honor <c>WasRenamedFrom</c>/<c>WasMovedFromSchema</c> annotations in the EF model and turn them into
+    /// refactor operations. Default: true.
+    /// </summary>
+    public bool UseModelAnnotations { get; set; } = true;
+
+    /// <summary>Explicit refactor operations appended after the ones derived from the model.</summary>
+    public RefactorLog? RefactorLog { get; set; }
+
+    /// <summary>Path of an SSDT-style <c>.refactorlog</c> file whose operations are appended last.</summary>
+    public string? RefactorLogPath { get; set; }
 }

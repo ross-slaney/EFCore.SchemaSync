@@ -102,6 +102,16 @@ public sealed class SchemaSyncOptions
     /// </summary>
     public Action<DacDeployOptions>? ConfigureDeployOptions { get; set; }
 
+    /// <summary>
+    /// Explicit renames and schema moves DacFx applies in place (<c>sp_rename</c>, <c>ALTER SCHEMA ... TRANSFER</c>)
+    /// instead of dropping and recreating objects. Applied after the operations derived from the model's
+    /// <c>WasRenamedFrom</c> annotations. Each operation runs once; DacFx records its key in <c>dbo.__RefactorLog</c>.
+    /// </summary>
+    public RefactorLog? RefactorLog { get; set; }
+
+    /// <summary>Path of an SSDT-style <c>.refactorlog</c> file whose operations are applied last.</summary>
+    public string? RefactorLogPath { get; set; }
+
     internal void Validate()
     {
         if (LockTimeout <= TimeSpan.Zero || LockTimeout > TimeSpan.FromDays(1))

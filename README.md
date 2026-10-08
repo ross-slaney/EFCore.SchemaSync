@@ -36,6 +36,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Defaults and options](#defaults-and-options)
 - [Results and errors](#results-and-errors)
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
+- [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Supported mappings (tested)](#supported-mappings-tested)
 - [Limitations](#limitations)
 - [Sample application and Aspire](#sample-application-and-aspire)
@@ -146,7 +147,7 @@ Azure AD / Entra ID access tokens set on the context's `SqlConnection` are forwa
 | A table, view, procedure, function, trigger, index, constraint or sequence exists in the database but not in the model (for example you removed an entity, a DBA added an index, or `__EFMigrationsHistory` is left over) | Preserved. Listed in `SchemaSyncResult.RetainedObjects` and logged as a warning. | `AllowObjectRemoval = true` drops them. Dropping a table that contains rows additionally needs `AllowDataLoss`; an empty table is dropped with `AllowObjectRemoval` alone. |
 | A column exists in a managed table but not in the model (you removed a property, or someone added a column by hand) | Blocked with `SchemaChangesBlockedException` before anything runs when the table contains rows, because DacFx cannot partially manage a table and dropping the column is lossy. On an empty table the column is dropped and the risk is listed in `DataLossRisks`. | `AllowDataLoss = true` drops the column regardless. |
 | A column is narrowed or its type changed in a way that may truncate (`nvarchar(200)` to `nvarchar(50)`, `bigint` to `int`), or a required column without a default is added | Blocked with `SchemaChangesBlockedException` when the table contains rows. | `AllowDataLoss = true`. SQL Server may still reject the statement at run time (for example a required column without a default on a populated table); the deployment then fails at the `Deploy` stage and rolls back. |
-| A property is renamed | EF has no rename information, so this is a drop plus an add and is blocked like a removal. Rename the column manually first (`sp_rename`) or accept the data loss. | `AllowDataLoss = true`. |
+| A property, table or schema is renamed | Without a hint EF has no rename information, so this is a drop plus an add and is blocked like a removal. | Declare the previous name with `WasRenamedFrom` (or an explicit `RefactorLog`) and DacFx renames in place, keeping the data. See [Renames and schema moves](#renames-and-schema-moves-refactor-log). |
 | Users, roles, role membership, permissions, logins, credentials, keys, certificates, audits, filegroups, files, database options and other database-level configuration | Never compared, never changed, never dropped. | None. These are always unmanaged. |
 | Index storage options (fill factor, padding, compression, lock hints), column order, table options, partitioning, replication flags, `WITH NOCHECK` | Ignored during comparison, so DBA tuning survives and a column added in the middle of a class is appended with `ALTER TABLE ADD` instead of rebuilding the table. | `ConfigureDeployOptions` if you really want DacFx to manage them. |
 | Seed data (`HasData`) | Not deployed. The result and the log carry a warning. | None. Seed separately. |
@@ -172,6 +173,8 @@ Every default is the safe one. `SchemaSyncOptions`:
 | `TargetSqlServerVersion` | `Sql160` (SQL Server 2022) | DacFx target platform of the generated DACPAC. |
 | `AllowIncompatiblePlatform` | `false` | Let DacFx deploy to a different platform (for example Azure SQL Database with `SqlAzure`). |
 | `LockResourceName` | `EFCore.SchemaSync` | `sp_getapplock` resource name, scoped to the target database. |
+| `RefactorLog` | `null` | Explicit renames and schema moves applied in place (see below), after the ones derived from model annotations. |
+| `RefactorLogPath` | `null` | An SSDT-style `.refactorlog` file whose operations are applied last. |
 | `ConfigureDeployOptions` | `null` | Escape hatch run last on the DacFx `DacDeployOptions`. |
 
 What DacFx is configured with by default: `BlockOnPossibleDataLoss`, `VerifyDeployment`,
@@ -189,7 +192,7 @@ plus `IgnorePermissions`, `IgnoreRoleMembership`, `IgnoreUserSettingsObjects`, `
 | Member | Content |
 | --- | --- |
 | `Outcome` | `NoChangesNeeded`, `Previewed` (dry run with differences) or `Applied`. |
-| `Changes` | The DacFx operations planned or executed: `Create`/`Alter`/`Drop`/`TableRebuild`/other, object type and name. |
+| `Changes` | The DacFx operations planned or executed: `Create`/`Alter`/`Drop`/`TableRebuild`/`Rename`/`MoveSchema`/other, object type and name. |
 | `RetainedObjects` | Target-only objects that were preserved. |
 | `DataLossRisks` | Every data-loss warning DacFx raised for the plan. Populated on dry runs, when `AllowDataLoss` is on, or when the affected tables were empty (otherwise the call throws `SchemaChangesBlockedException`). |
 | `Warnings` | Conversion and comparison warnings, for example skipped seed data. |
@@ -217,6 +220,109 @@ Before comparing, the library takes an exclusive `sp_getapplock` (`@LockOwner = 
 deployment has finished or failed. Other instances wait up to `LockTimeout`, then throw. Because the lock is owned by
 the session, it is released even if the process dies mid-deployment: the server releases it when the connection goes
 away. Instances that waited find no differences left and return `NoChangesNeeded`.
+
+## Renames and schema moves (refactor log)
+
+EF Core cannot tell a renamed property from a removed one plus a new one. Without more information a rename
+would deploy as a drop and an add, which the library blocks as data loss on a populated table. The fix is the
+same one SQL Server Data Tools projects use: a *refactor log*, a list of renames that DacFx applies in place
+(`sp_rename`, `ALTER SCHEMA ... TRANSFER`) before it compares the rest of the schema. EFCore.SchemaSync builds
+that log from your model and embeds it in the DACPAC it deploys.
+
+### Declare the rename next to the property
+
+```csharp
+modelBuilder.Entity<Customer>()
+    .Property(c => c.PhoneNumber)
+    .WasRenamedFrom("Phone");                    // column Phone -> PhoneNumber
+```
+
+Tables and schemas work the same way:
+
+```csharp
+modelBuilder.Entity<Customer>()
+    .ToTable("Clients", "crm")
+    .WasRenamedFrom("Customers", "dbo");         // table dbo.Customers -> crm.Clients
+
+modelBuilder.Entity<Invoice>()
+    .WasMovedFromSchema("dbo");                  // same table name, moved out of dbo
+```
+
+That is the whole change. On the next start the result reads, for the column case:
+
+```text
+Applied 1 change(s) for AppDbContext on localhost/app in 3.1s.
+  Rename SimpleColumn [dbo].[Customers].[PhoneNumber]
+```
+
+and the rows keep their values under the new name. The same change without the annotation throws
+`SchemaChangesBlockedException` and leaves the database untouched.
+
+### What happens underneath
+
+1. **Conversion** turns the annotations into refactor operations in a fixed order: column renames (addressed
+   to the table under its previous name), then table renames, then schema moves, then the keys, indexes and
+   foreign keys whose EF-conventional names changed with them (`PK_Customers` to `PK_Clients`,
+   `IX_Customers_Email` to `IX_Clients_Email`, `FK_Orders_Customers_CustomerId` to
+   `FK_Orders_Clients_CustomerId`, including foreign keys on other tables that point at the renamed table).
+   Constraints and indexes with custom names are left alone.
+2. **Keys.** Every operation gets a key derived from its content, so the same rename yields the same key on
+   every startup and on every instance.
+3. **Deployment.** DacFx runs the operations before the comparison. It skips an operation whose key is already
+   in `dbo.__RefactorLog` (a table DacFx creates for this purpose) or whose source object does not exist, and
+   records the key either way. The renamed objects now match the model, so the comparison has nothing to drop.
+4. **Result.** Renames appear in `SchemaSyncResult.Changes` as `Rename` and `MoveSchema` and are never listed
+   as data-loss risks. A dry run scripts them as `sp_rename` calls without executing anything.
+
+### When to add and remove the annotation
+
+- Add it in the same change that renames the property, table or schema, before any environment starts with
+  the new model.
+- Keep it as long as some environment may still carry the old name. It costs nothing afterwards: on a
+  database that was already renamed, or on a fresh one, the operation is skipped and only its key is written.
+- Remove it when every environment has been upgraded, if you prefer a tidy model. Removing it earlier makes
+  the next deployment to a not-yet-renamed database a blocked drop-and-add again.
+- An annotation records one previous name. For a chain (`Phone` to `Mobile` to `PhoneNumber`) that has to
+  work on databases at either stage, use the explicit log below with one operation per step.
+- A rename can be combined with other changes to the same column; the rename runs first and the remaining
+  difference (for example a widened type) is applied as usual. Narrowing is still blocked as data loss.
+
+### Explicit operations and SSDT files
+
+For operations the model cannot express, pass a `RefactorLog` in the options. Operations run in order, after
+the model-derived ones, and must name objects as they are called at that point in the sequence:
+
+```csharp
+new SchemaSyncOptions
+{
+    RefactorLog = new RefactorLog()
+        .RenameTable("dbo", "Customers", "Clients")
+        .RenameColumn("dbo", "Clients", "Phone", "PhoneNumber")
+        .MoveToSchema("dbo", "Clients", "crm")
+        .RenameIndex("crm", "Clients", "IX_Customers_Email", "IX_Clients_Email")
+        .RenameConstraint("crm", "Clients", RefactorConstraintKind.PrimaryKey, "PK_Customers", "PK_Clients"),
+}
+```
+
+If you already keep an SSDT `.refactorlog` file, point `SchemaSyncOptions.RefactorLogPath` at it; its
+operations are applied last and its keys are preserved. `RefactorLog.Load`, `Parse`, `ToXml` and `Save`
+convert between the two forms.
+
+| API | Effect |
+| --- | --- |
+| `PropertyBuilder.WasRenamedFrom(previousColumnName)` | Column rename. |
+| `EntityTypeBuilder.WasRenamedFrom(previousTableName)` | Table rename within the same schema. |
+| `EntityTypeBuilder.WasRenamedFrom(previousTableName, previousSchema)` | Table rename plus schema move. |
+| `EntityTypeBuilder.WasMovedFromSchema(previousSchema)` | Schema move only. |
+| `SchemaSyncOptions.RefactorLog` | Explicit `RenameTable`, `RenameColumn`, `MoveToSchema`, `RenameIndex`, `RenameConstraint` operations, applied after the model-derived ones. |
+| `SchemaSyncOptions.RefactorLogPath` | SSDT `.refactorlog` file, applied last, keys preserved. |
+| `SchemaConversionOptions.UseModelAnnotations` | Set to false to ignore the annotations (default true). |
+| `SchemaPackage.RefactorOperations` | The embedded operations, for inspection and tests. |
+
+Permissions: `sp_rename` needs `ALTER` on the table and `ALTER SCHEMA ... TRANSFER` needs `CONTROL` on the
+table plus `ALTER` on the target schema; `db_ddladmin` covers both. `dbo.__RefactorLog` belongs to DacFx: it
+is not reported as a retained object and `AllowObjectRemoval` never drops it. Rename inference stays out of
+scope on purpose: a rename is only ever what you declared.
 
 ## Supported mappings (tested)
 
@@ -257,7 +363,7 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
 
 - **SQL Server only**, one `DbContext` per database schema. Two contexts deploying into the same database would each
   treat the other's tables as target-only objects (preserved, but reported every time).
-- **No rename inference, backfills or seeding.** Renames are drop-and-add; data migrations stay your responsibility.
+- **No rename inference, backfills or seeding.** Renames must be declared (see the refactor log section); undeclared renames are drop-and-add. Data migrations stay your responsibility.
 - **Views, functions, procedures and triggers are not created** because EF Core does not create them either. Entities
   mapped with `ToView` need the view to exist already. Existing ones are preserved.
 - **Adding a required column without a default to a populated table fails** at the `Deploy` stage (SQL Server rejects
