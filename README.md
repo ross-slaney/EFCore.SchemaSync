@@ -223,59 +223,106 @@ away. Instances that waited find no differences left and return `NoChangesNeeded
 
 ## Renames and schema moves (refactor log)
 
-EF Core cannot tell a renamed property from a removed one plus a new one, so a plain rename deploys as a drop
-and an add, which the library blocks as data loss. SQL Server Data Tools projects solve this with a
-*refactor log*: a list of renames DacFx applies in place with `sp_rename` and `ALTER SCHEMA ... TRANSFER`
-before it compares the rest of the schema. EFCore.SchemaSync embeds the same log into the DACPAC it builds,
-in three ways that can be combined.
+EF Core cannot tell a renamed property from a removed one plus a new one. Without more information a rename
+would deploy as a drop and an add, which the library blocks as data loss on a populated table. The fix is the
+same one SQL Server Data Tools projects use: a *refactor log*, a list of renames that DacFx applies in place
+(`sp_rename`, `ALTER SCHEMA ... TRANSFER`) before it compares the rest of the schema. EFCore.SchemaSync builds
+that log from your model and embeds it in the DACPAC it deploys.
 
-**Annotations in the model** (the usual way): record the previous name next to the current one.
+### Declare the rename next to the property
 
 ```csharp
-modelBuilder.Entity<Customer>(e =>
-{
-    e.ToTable("Clients", "crm").WasRenamedFrom("Customers", "dbo");   // table rename + schema move
-    e.Property(c => c.PhoneNumber).WasRenamedFrom("Phone");             // column rename
-});
+modelBuilder.Entity<Customer>()
+    .Property(c => c.PhoneNumber)
+    .WasRenamedFrom("Phone");                    // column Phone -> PhoneNumber
 ```
 
-`WasMovedFromSchema("dbo")` covers a pure schema move. The converter emits column renames first (against the
-table's previous name), then table renames, then schema moves, so the operations are always consistent.
+Tables and schemas work the same way:
 
-**An explicit log** for operations the model cannot express, such as renaming indexes or constraints whose
-names changed with their table, or chains of renames. Operations run in order and name objects as they are
-called at that point in the sequence:
+```csharp
+modelBuilder.Entity<Customer>()
+    .ToTable("Clients", "crm")
+    .WasRenamedFrom("Customers", "dbo");         // table dbo.Customers -> crm.Clients
+
+modelBuilder.Entity<Invoice>()
+    .WasMovedFromSchema("dbo");                  // same table name, moved out of dbo
+```
+
+That is the whole change. On the next start the result reads, for the column case:
+
+```text
+Applied 1 change(s) for AppDbContext on localhost/app in 3.1s.
+  Rename SimpleColumn [dbo].[Customers].[PhoneNumber]
+```
+
+and the rows keep their values under the new name. The same change without the annotation throws
+`SchemaChangesBlockedException` and leaves the database untouched.
+
+### What happens underneath
+
+1. **Conversion** turns the annotations into refactor operations in a fixed order: column renames (addressed
+   to the table under its previous name), then table renames, then schema moves, then the keys, indexes and
+   foreign keys whose EF-conventional names changed with them (`PK_Customers` to `PK_Clients`,
+   `IX_Customers_Email` to `IX_Clients_Email`, `FK_Orders_Customers_CustomerId` to
+   `FK_Orders_Clients_CustomerId`, including foreign keys on other tables that point at the renamed table).
+   Constraints and indexes with custom names are left alone.
+2. **Keys.** Every operation gets a key derived from its content, so the same rename yields the same key on
+   every startup and on every instance.
+3. **Deployment.** DacFx runs the operations before the comparison. It skips an operation whose key is already
+   in `dbo.__RefactorLog` (a table DacFx creates for this purpose) or whose source object does not exist, and
+   records the key either way. The renamed objects now match the model, so the comparison has nothing to drop.
+4. **Result.** Renames appear in `SchemaSyncResult.Changes` as `Rename` and `MoveSchema` and are never listed
+   as data-loss risks. A dry run scripts them as `sp_rename` calls without executing anything.
+
+### When to add and remove the annotation
+
+- Add it in the same change that renames the property, table or schema, before any environment starts with
+  the new model.
+- Keep it as long as some environment may still carry the old name. It costs nothing afterwards: on a
+  database that was already renamed, or on a fresh one, the operation is skipped and only its key is written.
+- Remove it when every environment has been upgraded, if you prefer a tidy model. Removing it earlier makes
+  the next deployment to a not-yet-renamed database a blocked drop-and-add again.
+- An annotation records one previous name. For a chain (`Phone` to `Mobile` to `PhoneNumber`) that has to
+  work on databases at either stage, use the explicit log below with one operation per step.
+- A rename can be combined with other changes to the same column; the rename runs first and the remaining
+  difference (for example a widened type) is applied as usual. Narrowing is still blocked as data loss.
+
+### Explicit operations and SSDT files
+
+For operations the model cannot express, pass a `RefactorLog` in the options. Operations run in order, after
+the model-derived ones, and must name objects as they are called at that point in the sequence:
 
 ```csharp
 new SchemaSyncOptions
 {
     RefactorLog = new RefactorLog()
         .RenameTable("dbo", "Customers", "Clients")
-        .RenameIndex("dbo", "Clients", "IX_Customers_Email", "IX_Clients_Email")
-        .RenameConstraint("dbo", "Clients", RefactorConstraintKind.PrimaryKey, "PK_Customers", "PK_Clients"),
+        .RenameColumn("dbo", "Clients", "Phone", "PhoneNumber")
+        .MoveToSchema("dbo", "Clients", "crm")
+        .RenameIndex("crm", "Clients", "IX_Customers_Email", "IX_Clients_Email")
+        .RenameConstraint("crm", "Clients", RefactorConstraintKind.PrimaryKey, "PK_Customers", "PK_Clients"),
 }
 ```
 
-**An SSDT `.refactorlog` file** through `SchemaSyncOptions.RefactorLogPath`, if you keep one.
+If you already keep an SSDT `.refactorlog` file, point `SchemaSyncOptions.RefactorLogPath` at it; its
+operations are applied last and its keys are preserved. `RefactorLog.Load`, `Parse`, `ToXml` and `Save`
+convert between the two forms.
 
-How it behaves:
+| API | Effect |
+| --- | --- |
+| `PropertyBuilder.WasRenamedFrom(previousColumnName)` | Column rename. |
+| `EntityTypeBuilder.WasRenamedFrom(previousTableName)` | Table rename within the same schema. |
+| `EntityTypeBuilder.WasRenamedFrom(previousTableName, previousSchema)` | Table rename plus schema move. |
+| `EntityTypeBuilder.WasMovedFromSchema(previousSchema)` | Schema move only. |
+| `SchemaSyncOptions.RefactorLog` | Explicit `RenameTable`, `RenameColumn`, `MoveToSchema`, `RenameIndex`, `RenameConstraint` operations, applied after the model-derived ones. |
+| `SchemaSyncOptions.RefactorLogPath` | SSDT `.refactorlog` file, applied last, keys preserved. |
+| `SchemaConversionOptions.UseModelAnnotations` | Set to false to ignore the annotations (default true). |
+| `SchemaPackage.RefactorOperations` | The embedded operations, for inspection and tests. |
 
-- Every operation has a key. Annotations and the fluent API derive the key from the operation's content, so
-  the same rename yields the same key on every startup. DacFx records applied keys in `dbo.__RefactorLog`
-  (it creates the table) and never runs an operation twice. Keys from an imported file are kept as they are.
-- On a database where the old object does not exist (a fresh database, or one that was already renamed by
-  hand) the operation is skipped and its key is still recorded. Keeping an annotation around is therefore
-  harmless; remove it once every environment has been upgraded if you prefer a tidy model.
-- Renames show up in `SchemaSyncResult.Changes` as `Rename` and `MoveSchema` and are never data-loss risks.
-  Dry runs script them as `sp_rename` calls without executing anything.
-- After a table or column rename EF's conventional names change too (`PK_Customers` becomes `PK_Clients`,
-  `IX_Customers_Email` becomes `IX_Clients_Email`, `FK_Orders_Customers_CustomerId` becomes
-  `FK_Orders_Clients_CustomerId`). The annotations rename those primary keys, alternate keys, indexes and
-  foreign keys in place as well, as long as their current name follows EF's convention. Constraints and
-  indexes with custom names are left alone; rename them with explicit `RenameIndex`/`RenameConstraint`
-  operations if their names changed.
-- `dbo.__RefactorLog` belongs to DacFx: it is not reported as a retained object and `AllowObjectRemoval`
-  never drops it.
+Permissions: `sp_rename` needs `ALTER` on the table and `ALTER SCHEMA ... TRANSFER` needs `CONTROL` on the
+table plus `ALTER` on the target schema; `db_ddladmin` covers both. `dbo.__RefactorLog` belongs to DacFx: it
+is not reported as a retained object and `AllowObjectRemoval` never drops it. Rename inference stays out of
+scope on purpose: a rename is only ever what you declared.
 
 ## Supported mappings (tested)
 
