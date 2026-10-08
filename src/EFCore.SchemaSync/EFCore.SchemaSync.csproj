@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <PackageId>EFCore.SchemaSync</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>Ross Slaney</Authors>
     <Description>Your EF model is your schema. Deploy an EF Core model directly to SQL Server with Microsoft DacFx, with one method call and no migration files.</Description>
     <PackageTags>efcore;entity-framework;entity-framework-core;sqlserver;dacfx;dacpac;schema;database;migrations</PackageTags>

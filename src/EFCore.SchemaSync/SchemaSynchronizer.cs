@@ -41,6 +41,8 @@ internal static class SchemaSynchronizer
             TargetSqlServerVersion = options.TargetSqlServerVersion,
             Collation = collation,
             PackageName = contextName,
+            RefactorLog = options.RefactorLog,
+            RefactorLogPath = options.RefactorLogPath,
         });
         warnings.AddRange(package.Warnings);
         logger.LogInformation(
@@ -49,6 +51,13 @@ internal static class SchemaSynchronizer
         foreach (var warning in package.Warnings)
         {
             logger.LogWarning("EFCore.SchemaSync: {Warning}", warning);
+        }
+
+        if (package.RefactorOperations.Count > 0)
+        {
+            logger.LogInformation(
+                "EFCore.SchemaSync: {Count} refactor operation(s) are embedded (applied in place once, recorded in dbo.__RefactorLog): {Operations}",
+                package.RefactorOperations.Count, string.Join("; ", package.RefactorOperations.Select(o => o.ToString())));
         }
 
         cancellationToken.ThrowIfCancellationRequested();

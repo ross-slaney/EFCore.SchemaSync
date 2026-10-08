@@ -34,7 +34,8 @@ public static class SchemaConverter
             throw new SchemaSyncException(SchemaSyncStage.ConvertModel, $"EF Core could not generate the create script for {context.GetType().Name}: {ex.Message}", ex);
         }
 
-        return ConvertScript(createScript, options.PackageName ?? context.GetType().Name, options);
+        var refactorLog = options.UseModelAnnotations ? RefactorLogBuilder.FromModel(context.Model) : new RefactorLog();
+        return ConvertScript(createScript, options.PackageName ?? context.GetType().Name, options, refactorLog);
     }
 
     /// <summary>
@@ -42,12 +43,31 @@ public static class SchemaConverter
     /// SQL Server provider) into a DACPAC. Exposed for tests and diagnostics.
     /// </summary>
     public static SchemaPackage ConvertScript(string createScript, string packageName, SchemaConversionOptions? options = null)
+        => ConvertScript(createScript, packageName, options ?? new SchemaConversionOptions(), new RefactorLog());
+
+    private static SchemaPackage ConvertScript(string createScript, string packageName, SchemaConversionOptions options, RefactorLog refactorLog)
     {
         ArgumentNullException.ThrowIfNull(createScript);
         ArgumentException.ThrowIfNullOrWhiteSpace(packageName);
-        options ??= new SchemaConversionOptions();
+
+        if (options.RefactorLog is { } explicitLog)
+        {
+            refactorLog.AddRange(explicitLog.Operations);
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.RefactorLogPath))
+        {
+            try
+            {
+                refactorLog.AddRange(RefactorLog.Load(options.RefactorLogPath).Operations);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or System.Xml.XmlException)
+            {
+                throw new SchemaSyncException(SchemaSyncStage.ConvertModel, $"The refactor log '{options.RefactorLogPath}' could not be read: {ex.Message}", ex);
+            }
+        }
 
         var normalized = SqlServerScriptNormalizer.Normalize(createScript);
-        return DacpacBuilder.Build(normalized, packageName, options.TargetSqlServerVersion, options.Collation);
+        return DacpacBuilder.Build(normalized, packageName, options.TargetSqlServerVersion, options.Collation, refactorLog);
     }
 }

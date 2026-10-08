@@ -36,6 +36,24 @@ public sealed record SchemaShape
     /// <summary>Default value for Customers.Priority (null = no default).</summary>
     public int? PriorityDefault { get; init; } = 3;
 
+    /// <summary>Column name of the Phone property (rename it to exercise refactor operations).</summary>
+    public string PhoneColumn { get; init; } = "Phone";
+
+    /// <summary>Previous column name of Phone, declared with <c>WasRenamedFrom</c>.</summary>
+    public string? PhoneRenamedFrom { get; init; }
+
+    /// <summary>Table name of the Customers entity.</summary>
+    public string CustomersTable { get; init; } = "Customers";
+
+    /// <summary>Schema of the Customers table (null = dbo).</summary>
+    public string? CustomersSchema { get; init; }
+
+    /// <summary>Previous table name of Customers, declared with <c>WasRenamedFrom</c>.</summary>
+    public string? CustomersRenamedFrom { get; init; }
+
+    /// <summary>Previous schema of Customers, declared with <c>WasRenamedFrom</c>/<c>WasMovedFromSchema</c>.</summary>
+    public string? CustomersMovedFromSchema { get; init; }
+
     public static SchemaShape V1 => new();
 }
 
@@ -90,13 +108,34 @@ public sealed class EvolvingDbContext(DbContextOptions<EvolvingDbContext> option
 
         modelBuilder.Entity<EvolvingCustomer>(e =>
         {
-            e.ToTable("Customers");
+            if (Shape.CustomersSchema is null)
+            {
+                e.ToTable(Shape.CustomersTable);
+            }
+            else
+            {
+                e.ToTable(Shape.CustomersTable, Shape.CustomersSchema);
+            }
+
+            if (Shape.CustomersRenamedFrom is not null)
+            {
+                e.WasRenamedFrom(Shape.CustomersRenamedFrom, Shape.CustomersMovedFromSchema);
+            }
+            else if (Shape.CustomersMovedFromSchema is not null)
+            {
+                e.WasMovedFromSchema(Shape.CustomersMovedFromSchema);
+            }
+
             e.Property(p => p.Name).HasMaxLength(Shape.NameLength);
             e.Property(p => p.Email).HasMaxLength(320);
 
             if (Shape.Phone)
             {
-                e.Property(p => p.Phone).HasMaxLength(30);
+                var phone = e.Property(p => p.Phone).HasMaxLength(30).HasColumnName(Shape.PhoneColumn);
+                if (Shape.PhoneRenamedFrom is not null)
+                {
+                    phone.WasRenamedFrom(Shape.PhoneRenamedFrom);
+                }
             }
             else
             {

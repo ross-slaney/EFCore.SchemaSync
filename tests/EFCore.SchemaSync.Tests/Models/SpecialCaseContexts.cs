@@ -75,3 +75,49 @@ public sealed class DefaultSchemaDbContext(DbContextOptions<DefaultSchemaDbConte
         });
     }
 }
+
+/// <summary>Model with rename annotations: a renamed column, a renamed and moved table, and an owned type column rename.</summary>
+public sealed class RenamedDbContext(DbContextOptions<RenamedDbContext> options) : DbContext(options)
+{
+    public DbSet<Widget> Widgets => Set<Widget>();
+
+    public DbSet<Gadget> Gadgets => Set<Gadget>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Widget>(e =>
+        {
+            e.ToTable("Widgets", "crm").WasRenamedFrom("Widget", "dbo");
+            e.Property(p => p.Name).HasColumnName("Label").HasMaxLength(100).WasRenamedFrom("Name");
+            e.HasIndex(p => p.Name);
+        });
+
+        modelBuilder.Entity<Gadget>(e =>
+        {
+            e.ToTable("Gadgets");
+            e.Property(p => p.Title).HasMaxLength(100).WasRenamedFrom("Caption");
+            e.Property(p => p.Total).HasComputedColumnSql("[Price] * 2", stored: true).WasRenamedFrom("Double");
+            e.OwnsOne(p => p.Dimensions, d => d.Property(x => x.Height).HasColumnName("Dimensions_H").WasRenamedFrom("Dimensions_Height"));
+        });
+    }
+}
+
+public sealed class Gadget
+{
+    public int Id { get; set; }
+
+    public string Title { get; set; } = string.Empty;
+
+    public decimal Price { get; set; }
+
+    public decimal Total { get; set; }
+
+    public Dimensions Dimensions { get; set; } = new();
+}
+
+public sealed class Dimensions
+{
+    public int Width { get; set; }
+
+    public int Height { get; set; }
+}

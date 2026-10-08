@@ -71,6 +71,8 @@ internal sealed class DeployReport
         "Alter" => SchemaChangeKind.Alter,
         "Drop" => SchemaChangeKind.Drop,
         "TableRebuild" => SchemaChangeKind.TableRebuild,
+        "Rename" => SchemaChangeKind.Rename,
+        "MoveSchema" => SchemaChangeKind.MoveSchema,
         _ => SchemaChangeKind.Other,
     };
 

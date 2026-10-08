@@ -32,6 +32,12 @@ public enum SchemaChangeKind
 
     /// <summary>Any other DacFx operation (for example a module refresh); see <see cref="SchemaChange.Operation"/>.</summary>
     Other,
+
+    /// <summary>The object is renamed in place (<c>sp_rename</c>) because of a refactor log entry.</summary>
+    Rename,
+
+    /// <summary>The object is transferred to another schema (<c>ALTER SCHEMA ... TRANSFER</c>) because of a refactor log entry.</summary>
+    MoveSchema,
 }
 
 /// <summary>One planned or applied schema operation.</summary>

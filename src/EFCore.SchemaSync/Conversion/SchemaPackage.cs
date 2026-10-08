@@ -10,7 +10,7 @@ public sealed class SchemaPackage
 {
     private readonly byte[] _dacpac;
 
-    internal SchemaPackage(string name, byte[] dacpac, IReadOnlyList<SchemaObjectReference> objects, IReadOnlyList<string> warnings, string normalizedScript, int skippedSeedStatements)
+    internal SchemaPackage(string name, byte[] dacpac, IReadOnlyList<SchemaObjectReference> objects, IReadOnlyList<string> warnings, string normalizedScript, int skippedSeedStatements, IReadOnlyList<RefactorOperation> refactorOperations)
     {
         Name = name;
         _dacpac = dacpac;
@@ -18,6 +18,7 @@ public sealed class SchemaPackage
         Warnings = warnings;
         NormalizedScript = normalizedScript;
         SkippedSeedStatements = skippedSeedStatements;
+        RefactorOperations = refactorOperations;
     }
 
     /// <summary>Package name (the DbContext type name by default).</summary>
@@ -37,6 +38,9 @@ public sealed class SchemaPackage
 
     /// <summary>Number of INSERT statements (EF <c>HasData</c> seed rows) that were skipped because the library deploys schema only.</summary>
     public int SkippedSeedStatements { get; }
+
+    /// <summary>Renames and schema moves embedded in the DACPAC as its refactor log, in application order.</summary>
+    public IReadOnlyList<RefactorOperation> RefactorOperations { get; }
 
     /// <summary>Opens a read-only stream over the DACPAC bytes.</summary>
     public Stream OpenRead() => new MemoryStream(_dacpac, writable: false);
