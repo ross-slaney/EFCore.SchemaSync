@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="title desc">
+  <title id="title">EFCore.SchemaSync: an EF Core entity mapped column by column to a SQL Server table</title>
+  <desc id="desc">A code editor shows a Customer entity and its Fluent API configuration. Colored lines connect each property to a column of the dbo.Customers table in SQL Server. EFCore.SchemaSync compares and deploys the model with DacFx.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#14213d"/>
+    </linearGradient>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.3" fill="#94a3b8" opacity="0.14"/>
+    </pattern>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#38bdf8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
+    </marker>
+    <style>
+      .sans { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 15px; fill: #e2e8f0; }
+      .kw { fill: #7dd3fc; }
+      .ty { fill: #5eead4; }
+      .str { fill: #fdba74; }
+      .pn { fill: #94a3b8; }
+      .id { fill: #c4b5fd; }
+      .nm { fill: #6ee7b7; }
+      .em { fill: #fdba74; }
+      .ca { fill: #f9a8d4; }
+      .muted { fill: #94a3b8; }
+      .cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; fill: #e2e8f0; }
+      .head { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 700; fill: #64748b; letter-spacing: 1.5px; }
+      .badge { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <!-- background -->
+  <rect width="1200" height="640" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="640" rx="24" fill="url(#dots)"/>
+
+  <!-- heading -->
+  <text x="70" y="68" class="sans" font-size="30" font-weight="800" fill="#f8fafc">EFCore.SchemaSync</text>
+  <text x="70" y="96" class="sans" font-size="16" fill="#94a3b8">Your EF model is your schema. No migration files.</text>
+
+  <!-- the one call -->
+  <rect x="584" y="48" width="546" height="40" rx="20" fill="#0f172a" stroke="#1e3a5f"/>
+  <circle cx="608" cy="68" r="5" fill="#38bdf8"/>
+  <text x="624" y="73" class="mono" style="font-size:13px">await app.Services.ApplyDatabaseSchemaAsync&lt;AppDbContext&gt;();</text>
+
+  <!-- code card -->
+  <g filter="url(#shadow)">
+    <rect x="70" y="124" width="470" height="470" rx="16" fill="#0f172a" stroke="#1f2a44"/>
+    <path d="M70,140 a16,16 0 0 1 16,-16 h438 a16,16 0 0 1 16,16 v24 h-470 z" fill="#162033"/>
+  </g>
+  <circle cx="94" cy="144" r="5.5" fill="#ef4444"/>
+  <circle cx="112" cy="144" r="5.5" fill="#f59e0b"/>
+  <circle cx="130" cy="144" r="5.5" fill="#22c55e"/>
+  <text x="152" y="149" class="sans" font-size="13" fill="#94a3b8">AppDbContext.cs</text>
+
+  <g class="mono">
+    <text x="94" y="194"><tspan class="kw">public class</tspan> <tspan class="ty">Customer</tspan></text>
+    <text x="94" y="218" class="pn">{</text>
+    <text x="130" y="242"><tspan class="kw">public</tspan> <tspan class="ty">int</tspan> <tspan class="id">Id</tspan> <tspan class="pn">{ get; set; }</tspan></text>
+    <text x="130" y="266"><tspan class="kw">public</tspan> <tspan class="ty">string</tspan> <tspan class="nm">Name</tspan> <tspan class="pn">{ get; set; }</tspan></text>
+    <text x="130" y="290"><tspan class="kw">public</tspan> <tspan class="ty">string?</tspan> <tspan class="em">Email</tspan> <tspan class="pn">{ get; set; }</tspan></text>
+    <text x="130" y="314"><tspan class="kw">public</tspan> <tspan class="ty">DateTime</tspan> <tspan class="ca">CreatedAt</tspan> <tspan class="pn">{ get; set; }</tspan></text>
+    <text x="94" y="338" class="pn">}</text>
+    <text x="94" y="386">modelBuilder.Entity&lt;<tspan class="ty">Customer</tspan>&gt;(e =&gt;</text>
+    <text x="94" y="410" class="pn">{</text>
+    <text x="130" y="434">e.Property(c =&gt; c.<tspan class="nm">Name</tspan>).HasMaxLength(<tspan class="str">200</tspan>);</text>
+    <text x="130" y="458">e.Property(c =&gt; c.<tspan class="em">Email</tspan>).HasMaxLength(<tspan class="str">320</tspan>);</text>
+    <text x="130" y="482">e.HasIndex(c =&gt; c.<tspan class="em">Email</tspan>).IsUnique();</text>
+    <text x="130" y="506">e.Property(c =&gt; c.<tspan class="ca">CreatedAt</tspan>)</text>
+    <text x="139" y="530">.HasDefaultValueSql(<tspan class="str">"SYSUTCDATETIME()"</tspan>);</text>
+    <text x="94" y="554" class="pn">});</text>
+  </g>
+
+  <!-- table card -->
+  <g filter="url(#shadow)">
+    <rect x="730" y="124" width="400" height="470" rx="16" fill="#0f172a" stroke="#1f2a44"/>
+    <path d="M730,140 a16,16 0 0 1 16,-16 h368 a16,16 0 0 1 16,16 v24 h-400 z" fill="#162033"/>
+  </g>
+  <!-- database icon -->
+  <g transform="translate(750,135)" fill="none" stroke="#38bdf8" stroke-width="1.6">
+    <ellipse cx="9" cy="3.5" rx="8" ry="3.5"/>
+    <path d="M1,3.5 v11 a8,3.5 0 0 0 16,0 v-11"/>
+    <path d="M1,9 a8,3.5 0 0 0 16,0"/>
+  </g>
+  <text x="776" y="149" class="sans" font-size="13" fill="#94a3b8">SQL Server</text>
+  <text x="852" y="149" class="sans" font-size="13" font-weight="700" fill="#e2e8f0">dbo.Customers</text>
+
+  <g class="head">
+    <text x="752" y="192">COLUMN</text>
+    <text x="862" y="192">TYPE</text>
+    <text x="1000" y="192">NULL</text>
+  </g>
+  <line x1="746" y1="202" x2="1114" y2="202" stroke="#1f2a44"/>
+
+  <!-- rows -->
+  <g class="cell">
+    <circle cx="741" cy="237" r="4" fill="#c4b5fd"/>
+    <text x="752" y="242" class="id">Id</text>
+    <text x="862" y="242">int IDENTITY</text>
+    <text x="1000" y="242" class="muted">NOT NULL</text>
+    <rect x="1078" y="228" width="36" height="20" rx="10" fill="#4c1d95"/>
+    <text x="1096" y="242" class="badge" text-anchor="middle" fill="#ddd6fe">PK</text>
+  </g>
+  <line x1="746" y1="256" x2="1114" y2="256" stroke="#1f2a44"/>
+  <g class="cell">
+    <circle cx="741" cy="291" r="4" fill="#6ee7b7"/>
+    <text x="752" y="296" class="nm">Name</text>
+    <text x="862" y="296">nvarchar(200)</text>
+    <text x="1000" y="296" class="muted">NOT NULL</text>
+  </g>
+  <line x1="746" y1="310" x2="1114" y2="310" stroke="#1f2a44"/>
+  <g class="cell">
+    <circle cx="741" cy="345" r="4" fill="#fdba74"/>
+    <text x="752" y="350" class="em">Email</text>
+    <text x="862" y="350">nvarchar(320)</text>
+    <text x="1000" y="350" class="muted">NULL</text>
+    <rect x="1078" y="336" width="36" height="20" rx="10" fill="#7c2d12"/>
+    <text x="1096" y="350" class="badge" text-anchor="middle" fill="#fed7aa">UQ</text>
+  </g>
+  <line x1="746" y1="364" x2="1114" y2="364" stroke="#1f2a44"/>
+  <g class="cell">
+    <circle cx="741" cy="399" r="4" fill="#f9a8d4"/>
+    <text x="752" y="404" class="ca">CreatedAt</text>
+    <text x="862" y="404">datetime2</text>
+    <text x="1000" y="404" class="muted">NOT NULL</text>
+    <rect x="1078" y="390" width="36" height="20" rx="10" fill="#831843"/>
+    <text x="1096" y="404" class="badge" text-anchor="middle" fill="#fbcfe8">DF</text>
+  </g>
+  <line x1="746" y1="418" x2="1114" y2="418" stroke="#1f2a44"/>
+
+  <!-- constraints -->
+  <text x="752" y="452" class="head">CONSTRAINTS &amp; INDEXES</text>
+  <g class="cell" style="font-size:13px">
+    <text x="752" y="480"><tspan fill="#ddd6fe">PK_Customers</tspan><tspan class="muted">  PRIMARY KEY (Id)</tspan></text>
+    <text x="752" y="506"><tspan fill="#fed7aa">IX_Customers_Email</tspan><tspan class="muted">  UNIQUE (Email)</tspan></text>
+    <text x="752" y="532"><tspan fill="#fbcfe8">DF_Customers_CreatedAt</tspan><tspan class="muted">  SYSUTCDATETIME()</tspan></text>
+  </g>
+  <text x="752" y="572" class="sans" font-size="12" fill="#64748b">Compared and deployed in place. Existing rows are kept.</text>
+
+  <!-- property → column connectors -->
+  <g fill="none" stroke-width="2.2" stroke-linecap="round">
+    <path d="M548,237 C 630,237 650,237 736,237" stroke="#c4b5fd"/>
+    <path d="M548,261 C 630,261 650,291 736,291" stroke="#6ee7b7"/>
+    <path d="M548,285 C 630,285 650,345 736,345" stroke="#fdba74"/>
+    <path d="M548,309 C 630,309 650,399 736,399" stroke="#f9a8d4"/>
+  </g>
+  <g>
+    <circle cx="548" cy="237" r="4" fill="#c4b5fd"/>
+    <circle cx="548" cy="261" r="4" fill="#6ee7b7"/>
+    <circle cx="548" cy="285" r="4" fill="#fdba74"/>
+    <circle cx="548" cy="309" r="4" fill="#f9a8d4"/>
+  </g>
+
+  <!-- pipeline pill -->
+  <line x1="560" y1="486" x2="712" y2="486" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)" opacity="0.9"/>
+  <rect x="548" y="500" width="174" height="58" rx="14" fill="#0f172a" stroke="#1e3a5f"/>
+  <text x="635" y="523" class="sans" font-size="13" font-weight="700" fill="#e2e8f0" text-anchor="middle">model → DACPAC</text>
+  <text x="635" y="543" class="sans" font-size="12" fill="#94a3b8" text-anchor="middle">DacFx compare + deploy</text>
+</svg>

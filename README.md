@@ -9,6 +9,10 @@ Deploy your EF Core model directly to SQL Server using Microsoft DacFx—with on
 [![CI](https://github.com/ross-slaney/EFCore.SchemaSync/actions/workflows/ci.yml/badge.svg)](https://github.com/ross-slaney/EFCore.SchemaSync/actions/workflows/ci.yml)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-purple)](https://dotnet.microsoft.com)
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ross-slaney/EFCore.SchemaSync/main/docs/hero.png" alt="A Customer entity in AppDbContext.cs mapped property by property to the dbo.Customers table in SQL Server: EFCore.SchemaSync turns the model into a DACPAC and DacFx compares and deploys it." width="920">
+</p>
+
 ```csharp
 var app = builder.Build();
 
