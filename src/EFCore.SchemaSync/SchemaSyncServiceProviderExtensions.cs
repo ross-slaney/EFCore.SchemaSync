@@ -58,6 +58,6 @@ public static class SchemaSyncServiceProviderExtensions
             throw new SchemaSyncException(SchemaSyncStage.ResolveContext, $"Could not resolve {typeof(TContext).Name} from the service provider: {ex.Message}", ex);
         }
 
-        return await SchemaSynchronizer.ApplyAsync(context, options, logger, cancellationToken).ConfigureAwait(false);
+        return await SchemaSynchronizer.ApplyAsync(context, options, logger, scope.ServiceProvider, cancellationToken).ConfigureAwait(false);
     }
 }

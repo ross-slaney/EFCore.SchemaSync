@@ -21,7 +21,7 @@ if (SchemaCommand.IsRequested(args))
 }
 
 // Normal startup: the EF model is the schema. Failure throws and prevents the host from starting.
-await app.Services.ApplyDatabaseSchemaAsync<AppDbContext>();
+await app.Services.ApplyDatabaseSchemaAsync<AppDbContext>(SampleSchema.Configure);
 
 app.MapHealthChecks("/health");
 

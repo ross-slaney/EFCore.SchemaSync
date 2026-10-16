@@ -14,7 +14,7 @@ namespace EFCore.SchemaSync;
 /// </summary>
 internal static class SchemaSynchronizer
 {
-    public static async Task<SchemaSyncResult> ApplyAsync(DbContext context, SchemaSyncOptions options, ILogger logger, CancellationToken cancellationToken)
+    public static async Task<SchemaSyncResult> ApplyAsync(DbContext context, SchemaSyncOptions options, ILogger logger, IServiceProvider? services, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(options);
@@ -105,35 +105,103 @@ internal static class SchemaSynchronizer
         if (report.Operations.Count == 0)
         {
             logger.LogInformation("EFCore.SchemaSync: {Database} already matches the model of {Context}; no changes needed.", target.DatabaseName, contextName);
-            return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
-                report.Operations, retained, dataIssues, warnings, deploymentScript: null, stopwatch.Elapsed);
         }
-
-        logger.LogInformation(
-            "EFCore.SchemaSync: {Count} schema change(s) {Verb} for {Database}: {Changes}",
-            report.Operations.Count, options.DryRun ? "previewed" : "planned", target.DatabaseName,
-            string.Join("; ", report.Operations.Select(c => c.ToString())));
-
-        string? script = null;
-        if (options.DryRun || options.IncludeDeploymentScript)
+        else
         {
-            script = await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation(
+                "EFCore.SchemaSync: {Count} schema change(s) {Verb} for {Database}: {Changes}",
+                report.Operations.Count, options.DryRun ? "previewed" : "planned", target.DatabaseName,
+                string.Join("; ", report.Operations.Select(c => c.ToString())));
         }
 
         if (options.DryRun)
         {
-            return new SchemaSyncResult(SchemaSyncOutcome.Previewed, contextName, target.ServerName, target.DatabaseName,
-                report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed);
+            if (options.Hooks.Count > 0)
+            {
+                warnings.Add($"{options.Hooks.Count} hook(s) were not run because this is a dry run.");
+            }
+
+            var preview = report.Operations.Count == 0
+                ? null
+                : await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+            return new SchemaSyncResult(report.Operations.Count == 0 ? SchemaSyncOutcome.NoChangesNeeded : SchemaSyncOutcome.Previewed,
+                contextName, target.ServerName, target.DatabaseName, report.Operations, retained, dataIssues, warnings, preview, stopwatch.Elapsed);
         }
 
-        // 7. Deploy.
-        await deployer.DeployAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
-        logger.LogInformation(
-            "EFCore.SchemaSync: applied {Count} schema change(s) to {Server}/{Database} in {Elapsed:0.0}s.",
-            report.Operations.Count, target.ServerName, target.DatabaseName, stopwatch.Elapsed.TotalSeconds);
+        var executedHooks = new List<string>();
 
-        return new SchemaSyncResult(SchemaSyncOutcome.Applied, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed);
+        // 7. Before-deploy hooks (old schema, lock held).
+        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, report.Operations, result: null, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+
+        string? script = null;
+        var outcome = SchemaSyncOutcome.NoChangesNeeded;
+        if (report.Operations.Count > 0)
+        {
+            if (options.IncludeDeploymentScript)
+            {
+                script = await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+            }
+
+            // 8. Deploy.
+            await deployer.DeployAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+            outcome = SchemaSyncOutcome.Applied;
+            logger.LogInformation(
+                "EFCore.SchemaSync: applied {Count} schema change(s) to {Server}/{Database} in {Elapsed:0.0}s.",
+                report.Operations.Count, target.ServerName, target.DatabaseName, stopwatch.Elapsed.TotalSeconds);
+        }
+
+        // 9. After-deploy hooks (schema matches the model, lock held).
+        var applied = new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
+            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray());
+        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, report.Operations, applied, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+
+        return new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
+            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks);
+    }
+
+    private static async Task RunHooksAsync(
+        SchemaSyncHookPhase phase,
+        SchemaSyncOptions options,
+        DbContext context,
+        IServiceProvider? services,
+        IReadOnlyList<SchemaChange> changes,
+        SchemaSyncResult? result,
+        TargetConnection target,
+        ILogger logger,
+        List<string> executed,
+        CancellationToken cancellationToken)
+    {
+        var hooks = options.Hooks.Where(h => h.Phase == phase).ToList();
+        if (hooks.Count == 0)
+        {
+            return;
+        }
+
+        var hookContext = new SchemaSyncHookContext(phase, context, services, changes, result, target.ServerName, target.DatabaseName, logger);
+        foreach (var hook in hooks)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var started = Stopwatch.StartNew();
+            logger.LogInformation("EFCore.SchemaSync: running {Phase} hook '{Hook}'.", phase, hook.Name);
+            try
+            {
+                await hook.Callback(hookContext, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var (stage, consequence) = phase == SchemaSyncHookPhase.BeforeDeploy
+                    ? (SchemaSyncStage.BeforeDeployHook, "No schema change was executed.")
+                    : (SchemaSyncStage.AfterDeployHook, "The schema changes were already applied; later hooks did not run.");
+                throw new SchemaSyncException(stage, $"{phase} hook '{hook.Name}' failed: {ex.Message} {consequence}", ex);
+            }
+
+            executed.Add(hook.Name);
+            logger.LogInformation("EFCore.SchemaSync: {Phase} hook '{Hook}' completed in {Elapsed:0.0}s.", phase, hook.Name, started.Elapsed.TotalSeconds);
+        }
     }
 
     private static async Task<IReadOnlyList<SchemaObjectReference>> ComputeRetainedObjectsAsync(
