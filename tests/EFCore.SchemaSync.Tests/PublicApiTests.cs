@@ -83,6 +83,35 @@ public sealed class PublicApiTests
     }
 
     [TestMethod]
+    public void Hooks_are_registered_in_order_with_default_names()
+    {
+        static Task Noop(SchemaSyncHookContext context, CancellationToken token) => Task.CompletedTask;
+
+        var options = new SchemaSyncOptions();
+        var returned = options.BeforeDeploy(Noop).AfterDeploy("seed", Noop).BeforeDeploy(Noop).AfterDeploy(Noop);
+
+        Assert.AreSame(options, returned, "registration chains");
+        CollectionAssert.AreEqual(
+            new[] { "BeforeDeploy #1", "seed", "BeforeDeploy #2", "AfterDeploy #2" },
+            options.Hooks.Select(h => h.Name).ToArray());
+        CollectionAssert.AreEqual(
+            new[] { SchemaSyncHookPhase.BeforeDeploy, SchemaSyncHookPhase.AfterDeploy, SchemaSyncHookPhase.BeforeDeploy, SchemaSyncHookPhase.AfterDeploy },
+            options.Hooks.Select(h => h.Phase).ToArray());
+        options.Validate();
+    }
+
+    [TestMethod]
+    public void Hook_registration_rejects_missing_callbacks_and_blank_names()
+    {
+        var options = new SchemaSyncOptions();
+
+        Assert.ThrowsExactly<ArgumentNullException>(() => options.AfterDeploy(null!));
+        Assert.ThrowsExactly<ArgumentException>(() => options.AfterDeploy(" ", (_, _) => Task.CompletedTask));
+        options.Hooks.Add(new SchemaSyncHook("bad", SchemaSyncHookPhase.AfterDeploy, null!));
+        Assert.ThrowsExactly<ArgumentException>(() => options.Validate());
+    }
+
+    [TestMethod]
     public void Exceptions_name_their_stage()
     {
         var ex = new SchemaSyncException(SchemaSyncStage.Deploy, "boom", new InvalidOperationException("inner"));

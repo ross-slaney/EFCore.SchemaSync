@@ -58,11 +58,14 @@ public sealed class SampleAppTests
         StringAssert.Contains(first.StandardOutput, "Applied");
         StringAssert.Contains(first.StandardOutput, "Create Table [app].[Lists]");
         Assert.IsTrue(await db.ObjectExistsAsync("app.Items"));
+        StringAssert.Contains(first.StandardOutput, "Hook: seed inbox list");
+        Assert.AreEqual(1, await db.ScalarAsync<int>("SELECT COUNT(*) FROM app.Lists WHERE Name = N'Inbox'"), "the AfterDeploy hook seeded reference data");
         Assert.IsFalse(first.StandardOutput.Contains("Now listening on", StringComparison.Ordinal), "Kestrel must not start");
 
         var second = await SampleProcess.RunAsync(db.ConnectionString, "--apply-schema");
         Assert.AreEqual(0, second.ExitCode, second.StandardError);
         StringAssert.Contains(second.StandardOutput, "Schema is current");
+        Assert.AreEqual(1, await db.ScalarAsync<int>("SELECT COUNT(*) FROM app.Lists WHERE Name = N'Inbox'"), "the seed is idempotent");
     }
 
     [TestMethod]

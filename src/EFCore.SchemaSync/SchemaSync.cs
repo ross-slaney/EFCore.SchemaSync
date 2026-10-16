@@ -17,5 +17,5 @@ public static class SchemaSync
     /// <exception cref="SchemaSyncException">The operation failed; <see cref="SchemaSyncException.Stage"/> names the stage.</exception>
     /// <exception cref="OperationCanceledException">The operation was cancelled.</exception>
     public static Task<SchemaSyncResult> ApplyAsync(DbContext context, SchemaSyncOptions? options = null, ILogger? logger = null, CancellationToken cancellationToken = default)
-        => SchemaSynchronizer.ApplyAsync(context, options ?? new SchemaSyncOptions(), logger ?? NullLogger.Instance, cancellationToken);
+        => SchemaSynchronizer.ApplyAsync(context, options ?? new SchemaSyncOptions(), logger ?? NullLogger.Instance, services: null, cancellationToken);
 }

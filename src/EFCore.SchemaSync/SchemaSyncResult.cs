@@ -73,8 +73,10 @@ public sealed class SchemaSyncResult
         IReadOnlyList<string> dataLossRisks,
         IReadOnlyList<string> warnings,
         string? deploymentScript,
-        TimeSpan duration)
+        TimeSpan duration,
+        IReadOnlyList<string>? executedHooks = null)
     {
+        ExecutedHooks = executedHooks ?? [];
         Outcome = outcome;
         ContextName = contextName;
         ServerName = serverName;
@@ -126,6 +128,9 @@ public sealed class SchemaSyncResult
     /// <summary>Wall-clock time of the whole operation, including lock wait.</summary>
     public TimeSpan Duration { get; }
 
+    /// <summary>Names of the hooks that ran, in order. Empty on dry runs.</summary>
+    public IReadOnlyList<string> ExecutedHooks { get; }
+
     /// <summary>True when at least one schema operation was planned or applied.</summary>
     public bool HasChanges => Changes.Count > 0;
 
@@ -160,6 +165,11 @@ public sealed class SchemaSyncResult
         foreach (var risk in DataLossRisks)
         {
             sb.AppendLine().Append("  Data loss risk: ").Append(risk);
+        }
+
+        foreach (var hook in ExecutedHooks)
+        {
+            sb.AppendLine().Append("  Hook: ").Append(hook);
         }
 
         foreach (var warning in Warnings)

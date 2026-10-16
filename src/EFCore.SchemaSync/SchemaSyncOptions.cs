@@ -112,6 +112,46 @@ public sealed class SchemaSyncOptions
     /// <summary>Path of an SSDT-style <c>.refactorlog</c> file whose operations are applied last.</summary>
     public string? RefactorLogPath { get; set; }
 
+    /// <summary>Registered hooks in registration order. Use <see cref="BeforeDeploy(string, Func{SchemaSyncHookContext, CancellationToken, Task})"/> and <see cref="AfterDeploy(string, Func{SchemaSyncHookContext, CancellationToken, Task})"/> to add them.</summary>
+    public IList<SchemaSyncHook> Hooks { get; } = new List<SchemaSyncHook>();
+
+    /// <summary>
+    /// Registers C# code that runs after the comparison and before any schema change, while the schema lock is held
+    /// (for example to fix data so a change can succeed). Runs on every real application, never on a dry run, and
+    /// not when the deployment is blocked. Must be idempotent.
+    /// </summary>
+    public SchemaSyncOptions BeforeDeploy(Func<SchemaSyncHookContext, CancellationToken, Task> hook)
+        => AddHook(null, SchemaSyncHookPhase.BeforeDeploy, hook);
+
+    /// <inheritdoc cref="BeforeDeploy(Func{SchemaSyncHookContext, CancellationToken, Task})"/>
+    public SchemaSyncOptions BeforeDeploy(string name, Func<SchemaSyncHookContext, CancellationToken, Task> hook)
+        => AddHook(name, SchemaSyncHookPhase.BeforeDeploy, hook);
+
+    /// <summary>
+    /// Registers C# code that runs after the schema matches the EF model, while the schema lock is held (for example
+    /// to seed reference data with the DbContext). Runs on every real application, including when no change was
+    /// needed, and never on a dry run. Must be idempotent.
+    /// </summary>
+    public SchemaSyncOptions AfterDeploy(Func<SchemaSyncHookContext, CancellationToken, Task> hook)
+        => AddHook(null, SchemaSyncHookPhase.AfterDeploy, hook);
+
+    /// <inheritdoc cref="AfterDeploy(Func{SchemaSyncHookContext, CancellationToken, Task})"/>
+    public SchemaSyncOptions AfterDeploy(string name, Func<SchemaSyncHookContext, CancellationToken, Task> hook)
+        => AddHook(name, SchemaSyncHookPhase.AfterDeploy, hook);
+
+    private SchemaSyncOptions AddHook(string? name, SchemaSyncHookPhase phase, Func<SchemaSyncHookContext, CancellationToken, Task> hook)
+    {
+        ArgumentNullException.ThrowIfNull(hook);
+        if (name is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        }
+
+        var number = Hooks.Count(h => h.Phase == phase) + 1;
+        Hooks.Add(new SchemaSyncHook(name ?? $"{phase} #{number}", phase, hook));
+        return this;
+    }
+
     internal void Validate()
     {
         if (LockTimeout <= TimeSpan.Zero || LockTimeout > TimeSpan.FromDays(1))
@@ -127,6 +167,11 @@ public sealed class SchemaSyncOptions
         if (LongRunningCommandTimeout is { } longRunning && longRunning <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(LongRunningCommandTimeout), "LongRunningCommandTimeout must be positive when set.");
+        }
+
+        if (Hooks.Any(h => h is null || h.Callback is null || string.IsNullOrWhiteSpace(h.Name)))
+        {
+            throw new ArgumentException("Every hook needs a name and a callback.", nameof(Hooks));
         }
 
         if (string.IsNullOrWhiteSpace(LockResourceName) || LockResourceName.Length > 255)

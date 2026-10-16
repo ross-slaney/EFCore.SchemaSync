@@ -27,6 +27,7 @@ public static class SchemaCommand
             AllowDataLoss = args.Contains("--allow-data-loss", StringComparer.OrdinalIgnoreCase),
             AllowObjectRemoval = args.Contains("--allow-object-removal", StringComparer.OrdinalIgnoreCase),
         };
+        SampleSchema.Configure(options);
 
         try
         {

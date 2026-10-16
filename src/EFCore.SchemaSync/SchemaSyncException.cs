@@ -23,6 +23,12 @@ public enum SchemaSyncStage
 
     /// <summary>Executing the deployment against the database.</summary>
     Deploy,
+
+    /// <summary>Running a <see cref="SchemaSyncHookPhase.BeforeDeploy"/> hook. No schema change was executed.</summary>
+    BeforeDeployHook,
+
+    /// <summary>Running a <see cref="SchemaSyncHookPhase.AfterDeploy"/> hook. The schema changes were already applied.</summary>
+    AfterDeployHook,
 }
 
 /// <summary>

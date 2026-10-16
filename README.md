@@ -37,6 +37,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Results and errors](#results-and-errors)
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
+- [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
 - [Supported mappings (tested)](#supported-mappings-tested)
 - [Limitations](#limitations)
 - [Sample application and Aspire](#sample-application-and-aspire)
@@ -150,7 +151,7 @@ Azure AD / Entra ID access tokens set on the context's `SqlConnection` are forwa
 | A property, table or schema is renamed | Without a hint EF has no rename information, so this is a drop plus an add and is blocked like a removal. | Declare the previous name with `WasRenamedFrom` (or an explicit `RefactorLog`) and DacFx renames in place, keeping the data. See [Renames and schema moves](#renames-and-schema-moves-refactor-log). |
 | Users, roles, role membership, permissions, logins, credentials, keys, certificates, audits, filegroups, files, database options and other database-level configuration | Never compared, never changed, never dropped. | None. These are always unmanaged. |
 | Index storage options (fill factor, padding, compression, lock hints), column order, table options, partitioning, replication flags, `WITH NOCHECK` | Ignored during comparison, so DBA tuning survives and a column added in the middle of a class is appended with `ALTER TABLE ADD` instead of rebuilding the table. | `ConfigureDeployOptions` if you really want DacFx to manage them. |
-| Seed data (`HasData`) | Not deployed. The result and the log carry a warning. | None. Seed separately. |
+| Seed data (`HasData`) | Not deployed. The result and the log carry a warning. | Seed with an `AfterDeploy` hook (see [Deploy hooks](#deploy-hooks-c-instead-of-prepost-deployment-scripts)). |
 
 The rule is the one DacFx itself applies when it executes with `BlockOnPossibleDataLoss`: a flagged change only blocks when the affected table holds rows. The library checks that before running any DDL so the failure is deterministic, and DacFx checks it again at execution time. Dry runs never block: they return `Previewed` with the risks listed in `SchemaSyncResult.DataLossRisks`.
 
@@ -175,6 +176,7 @@ Every default is the safe one. `SchemaSyncOptions`:
 | `LockResourceName` | `EFCore.SchemaSync` | `sp_getapplock` resource name, scoped to the target database. |
 | `RefactorLog` | `null` | Explicit renames and schema moves applied in place (see below), after the ones derived from model annotations. |
 | `RefactorLogPath` | `null` | An SSDT-style `.refactorlog` file whose operations are applied last. |
+| `BeforeDeploy(...)`, `AfterDeploy(...)` | none | C# hooks that run under the schema lock before and after the schema changes (see below). |
 | `ConfigureDeployOptions` | `null` | Escape hatch run last on the DacFx `DacDeployOptions`. |
 
 What DacFx is configured with by default: `BlockOnPossibleDataLoss`, `VerifyDeployment`,
@@ -197,11 +199,12 @@ plus `IgnorePermissions`, `IgnoreRoleMembership`, `IgnoreUserSettingsObjects`, `
 | `DataLossRisks` | Every data-loss warning DacFx raised for the plan. Populated on dry runs, when `AllowDataLoss` is on, or when the affected tables were empty (otherwise the call throws `SchemaChangesBlockedException`). |
 | `Warnings` | Conversion and comparison warnings, for example skipped seed data. |
 | `DeploymentScript` | The SQLCMD-mode script (dry runs, or `IncludeDeploymentScript`). |
+| `ExecutedHooks` | Names of the hooks that ran, in order. Empty on dry runs. |
 | `ContextName`, `ServerName`, `DatabaseName`, `Duration` | What was applied where, and how long it took including the lock wait. |
 | `Describe()` | Multi-line summary for logs and consoles. |
 
 All failures derive from `SchemaSyncException`. `Stage` says where the operation failed (`ResolveContext`,
-`ConvertModel`, `BuildPackage`, `Connect`, `AcquireLock`, `Compare`, `Deploy`) and `InnerException` keeps the DacFx,
+`ConvertModel`, `BuildPackage`, `Connect`, `AcquireLock`, `Compare`, `BeforeDeployHook`, `Deploy`, `AfterDeployHook`) and `InnerException` keeps the DacFx,
 SqlClient or EF Core cause. Specialized subclasses:
 
 | Exception | Stage | Meaning |
@@ -324,6 +327,48 @@ table plus `ALTER` on the target schema; `db_ddladmin` covers both. `dbo.__Refac
 is not reported as a retained object and `AllowObjectRemoval` never drops it. Rename inference stays out of
 scope on purpose: a rename is only ever what you declared.
 
+## Deploy hooks: C# instead of pre/post-deployment scripts
+
+SQL Server Data Tools projects run data fixes and reference data through pre- and post-deployment SQL scripts.
+EFCore.SchemaSync keeps SQL out of your project: register C# hooks that receive the DbContext and run as part
+of the schema application.
+
+```csharp
+await app.Services.ApplyDatabaseSchemaAsync<AppDbContext>(options => options
+    .AfterDeploy("seed countries", async (hook, ct) =>
+    {
+        var db = hook.GetDbContext<AppDbContext>();
+        if (!await db.Countries.AnyAsync(ct))
+        {
+            db.Countries.AddRange(new Country { Code = "NZ", Name = "New Zealand" }, new Country { Code = "SE", Name = "Sweden" });
+            await db.SaveChangesAsync(ct);
+        }
+    }));
+```
+
+`BeforeDeploy` runs against the old schema, after the comparison and before any change is executed, which is the
+place to fix data so a change can succeed:
+
+```csharp
+options.AllowDataLoss = true;   // shrinking Name from 100 to 50 characters is a lossy change
+options.BeforeDeploy("truncate long names", (hook, ct) =>
+    hook.GetDbContext<AppDbContext>().Customers
+        .Where(c => c.Name.Length > 50)
+        .ExecuteUpdateAsync(s => s.SetProperty(c => c.Name, c => c.Name.Substring(0, 50)), ct));
+```
+
+| Rule | Behavior |
+| --- | --- |
+| Order | Lock, compare, `BeforeDeploy` hooks, schema changes, `AfterDeploy` hooks, release lock. Hooks of the same phase run in registration order. |
+| When | On every real application, including when the schema was already current (`hook.HasChanges` tells you which). Never on a dry run (the result lists a warning instead), and never when the deployment is blocked as data loss. Write hooks to be idempotent. |
+| Concurrency | Hooks run while the schema lock is held, so concurrent instances never run them at the same time. |
+| Context | `hook.DbContext` / `GetDbContext<T>()` is the context being applied, from the same scope, on its own connection. `hook.Services` is the scoped service provider (null without DI). `hook.Changes` holds the planned (before) or applied (after) changes and `hook.Result` the result (after only). In `BeforeDeploy` the database still has the old schema, so only touch what exists in both. |
+| Transactions | Hooks are not part of the deployment transaction. Open your own with `DbContext.Database.BeginTransactionAsync` if a hook needs one. |
+| Failure | A failing `BeforeDeploy` hook throws `SchemaSyncException` with stage `BeforeDeployHook` and nothing is executed. A failing `AfterDeploy` hook throws with stage `AfterDeployHook`; the schema changes stay applied and later hooks do not run. The original exception is the `InnerException`. Cancellation propagates as `OperationCanceledException`. |
+
+The sample app seeds its `Inbox` list this way in
+[SampleSchema.cs](samples/SchemaSync.Sample/SampleSchema.cs), shared by web startup and `--apply-schema`.
+
 ## Supported mappings (tested)
 
 Every row is exercised by the integration tests against a real SQL Server 2022 container: the object is created in
@@ -348,7 +393,7 @@ an empty database, inspected through the catalog views, and a second apply must 
 | Inheritance | TPH with `HasDiscriminator` | Tested |
 | Temporal tables | `IsTemporal()` with the default history table | Tested (creation, idempotency, adding a column with history preserved) |
 | Comments | `HasComment` on tables and columns (extended properties) | Tested |
-| Seed data | `HasData` | Skipped with a warning (schema deploys) |
+| Seed data | `HasData` | Skipped with a warning (schema deploys); seed with an `AfterDeploy` hook instead |
 
 Other mappings built from the same primitives (TPT and TPC inheritance, many-to-many join entities, table splitting,
 JSON columns stored as `nvarchar(max)`, HiLo) are expected to work but are not part of the test matrix.
@@ -363,7 +408,7 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
 
 - **SQL Server only**, one `DbContext` per database schema. Two contexts deploying into the same database would each
   treat the other's tables as target-only objects (preserved, but reported every time).
-- **No rename inference, backfills or seeding.** Renames must be declared (see the refactor log section); undeclared renames are drop-and-add. Data migrations stay your responsibility.
+- **No rename inference, backfills or built-in seeding.** Renames must be declared (see the refactor log section); undeclared renames are drop-and-add. Data fixes and seed data are your code, run through deploy hooks.
 - **Views, functions, procedures and triggers are not created** because EF Core does not create them either. Entities
   mapped with `ToView` need the view to exist already. Existing ones are preserved.
 - **Adding a required column without a default to a populated table fails** at the `Deploy` stage (SQL Server rejects
