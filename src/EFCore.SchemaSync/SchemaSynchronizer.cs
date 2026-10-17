@@ -4,6 +4,7 @@ using EFCore.SchemaSync.Deployment;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.SqlServer.Dac.Model;
 
 namespace EFCore.SchemaSync;
 
@@ -34,11 +35,12 @@ internal static class SchemaSynchronizer
         // 2. Connect. This connection owns the schema lock for the rest of the operation.
         await using var connection = await target.OpenAsync(cancellationToken).ConfigureAwait(false);
         var collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+        var platform = options.TargetSqlServerVersion ?? await DetectPlatformAsync(connection, logger, cancellationToken).ConfigureAwait(false);
 
         // 3. Convert the EF model into a validated DACPAC (no database access).
         var package = SchemaConverter.Convert(context, new SchemaConversionOptions
         {
-            TargetSqlServerVersion = options.TargetSqlServerVersion,
+            TargetSqlServerVersion = platform,
             Collation = collation,
             PackageName = contextName,
             RefactorLog = options.RefactorLog,
@@ -125,7 +127,7 @@ internal static class SchemaSynchronizer
                 ? null
                 : await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
             return new SchemaSyncResult(report.Operations.Count == 0 ? SchemaSyncOutcome.NoChangesNeeded : SchemaSyncOutcome.Previewed,
-                contextName, target.ServerName, target.DatabaseName, report.Operations, retained, dataIssues, warnings, preview, stopwatch.Elapsed);
+                contextName, target.ServerName, target.DatabaseName, report.Operations, retained, dataIssues, warnings, preview, stopwatch.Elapsed, targetPlatform: platform);
         }
 
         var executedHooks = new List<string>();
@@ -152,11 +154,11 @@ internal static class SchemaSynchronizer
 
         // 9. After-deploy hooks (schema matches the model, lock held).
         var applied = new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray());
+            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), platform);
         await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, report.Operations, applied, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
 
         return new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks);
+            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, platform);
     }
 
     private static async Task RunHooksAsync(
@@ -296,6 +298,14 @@ internal static class SchemaSynchronizer
         {
             return true; // cannot prove the table is empty: stay on the safe side
         }
+    }
+
+    private static async Task<SqlServerVersion> DetectPlatformAsync(SqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        var server = await TargetPlatform.ReadAsync(connection, cancellationToken).ConfigureAwait(false);
+        var platform = TargetPlatform.Resolve(server);
+        logger.LogInformation("EFCore.SchemaSync: targeting {Platform} (detected {Server}).", platform, TargetPlatform.Describe(server));
+        return platform;
     }
 
     private static async Task<string?> ReadDatabaseCollationAsync(SqlConnection connection, ILogger logger, CancellationToken cancellationToken)

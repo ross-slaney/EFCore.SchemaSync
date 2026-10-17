@@ -74,9 +74,11 @@ public sealed class SchemaSyncResult
         IReadOnlyList<string> warnings,
         string? deploymentScript,
         TimeSpan duration,
-        IReadOnlyList<string>? executedHooks = null)
+        IReadOnlyList<string>? executedHooks = null,
+        Microsoft.SqlServer.Dac.Model.SqlServerVersion? targetPlatform = null)
     {
         ExecutedHooks = executedHooks ?? [];
+        TargetPlatform = targetPlatform;
         Outcome = outcome;
         ContextName = contextName;
         ServerName = serverName;
@@ -130,6 +132,9 @@ public sealed class SchemaSyncResult
 
     /// <summary>Names of the hooks that ran, in order. Empty on dry runs.</summary>
     public IReadOnlyList<string> ExecutedHooks { get; }
+
+    /// <summary>The DacFx platform the DACPAC targeted: detected from the server unless <see cref="SchemaSyncOptions.TargetSqlServerVersion"/> was set.</summary>
+    public Microsoft.SqlServer.Dac.Model.SqlServerVersion? TargetPlatform { get; }
 
     /// <summary>True when at least one schema operation was planned or applied.</summary>
     public bool HasChanges => Changes.Count > 0;
