@@ -98,10 +98,17 @@ public sealed class SchemaChangesBlockedException : SchemaSyncException
 {
     /// <summary>Creates the exception from DacFx data-loss issues.</summary>
     public SchemaChangesBlockedException(IReadOnlyList<string> dataLossRisks, IReadOnlyList<SchemaChange> plannedChanges)
-        : base(SchemaSyncStage.Compare, BuildMessage(dataLossRisks))
+        : this(dataLossRisks, plannedChanges, [])
+    {
+    }
+
+    /// <summary>Creates the exception from DacFx data-loss issues and rename hints.</summary>
+    public SchemaChangesBlockedException(IReadOnlyList<string> dataLossRisks, IReadOnlyList<SchemaChange> plannedChanges, IReadOnlyList<RenameHint> renameHints)
+        : base(SchemaSyncStage.Compare, BuildMessage(dataLossRisks, renameHints))
     {
         DataLossRisks = dataLossRisks;
         PlannedChanges = plannedChanges;
+        RenameHints = renameHints;
     }
 
     /// <summary>DacFx descriptions of the lossy operations.</summary>
@@ -110,8 +117,20 @@ public sealed class SchemaChangesBlockedException : SchemaSyncException
     /// <summary>The full set of operations DacFx planned, including the lossy ones.</summary>
     public IReadOnlyList<SchemaChange> PlannedChanges { get; }
 
-    private static string BuildMessage(IReadOnlyList<string> risks)
-        => "Deployment blocked: the planned schema changes may cause data loss and SchemaSyncOptions.AllowDataLoss is false. "
-         + "Review the changes and set AllowDataLoss = true to apply them:"
-         + Environment.NewLine + "  - " + string.Join(Environment.NewLine + "  - ", risks);
+    /// <summary>Changes in the plan that look like undeclared renames, with the configuration line that declares each one.</summary>
+    public IReadOnlyList<RenameHint> RenameHints { get; }
+
+    private static string BuildMessage(IReadOnlyList<string> risks, IReadOnlyList<RenameHint> hints)
+    {
+        var message = "Deployment blocked: the planned schema changes may cause data loss and SchemaSyncOptions.AllowDataLoss is false. "
+            + "Review the changes and set AllowDataLoss = true to apply them:"
+            + Environment.NewLine + "  - " + string.Join(Environment.NewLine + "  - ", risks);
+        if (hints.Count > 0)
+        {
+            message += Environment.NewLine + "If this is a rename, declare it so the data is kept and the change is applied in place:"
+                + Environment.NewLine + "  - " + string.Join(Environment.NewLine + "  - ", hints.Select(h => h.ToString()));
+        }
+
+        return message;
+    }
 }

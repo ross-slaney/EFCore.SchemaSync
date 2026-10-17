@@ -200,6 +200,7 @@ plus `IgnorePermissions`, `IgnoreRoleMembership`, `IgnoreUserSettingsObjects`, `
 | `Warnings` | Conversion and comparison warnings, for example skipped seed data. |
 | `DeploymentScript` | The SQLCMD-mode script (dry runs, or `IncludeDeploymentScript`). |
 | `ExecutedHooks` | Names of the hooks that ran, in order. Empty on dry runs. |
+| `RenameHints` | Changes that look like undeclared renames, with the `WasRenamedFrom` line that declares each one. |
 | `ContextName`, `ServerName`, `DatabaseName`, `Duration` | What was applied where, and how long it took including the lock wait. |
 | `Describe()` | Multi-line summary for logs and consoles. |
 
@@ -260,6 +261,29 @@ Applied 1 change(s) for AppDbContext on localhost/app in 3.1s.
 
 and the rows keep their values under the new name. The same change without the annotation throws
 `SchemaChangesBlockedException` and leaves the database untouched.
+
+### If you forget the annotation
+
+The library never guesses a rename, but it recognizes the shape of one and tells you the line to add:
+
+- **Column:** a column the model no longer maps next to a new column of the same base type in the same table.
+  On a populated table the deployment is blocked as data loss, and `SchemaChangesBlockedException` lists the
+  hint in its message and in `RenameHints`:
+
+  ```text
+  If this is a rename, declare it so the data is kept and the change is applied in place:
+    - [dbo].[Customers].[Phone] -> [dbo].[Customers].[PhoneNumber]: modelBuilder.Entity<Customer>().Property(e => e.PhoneNumber).WasRenamedFrom("Phone");
+  ```
+
+- **Table:** a new table whose columns equal those of a table the model no longer maps. Without the annotation
+  the deployment creates the new, empty table and keeps the old one with all the data, which is easy to miss,
+  so the result carries a warning and `SchemaSyncResult.RenameHints` holds the suggestion
+  (`modelBuilder.Entity<Customer>().WasRenamedFrom("Customers");`, with the previous schema when it moved).
+
+Hints only appear for one-to-one matches. Two renamed columns of the same type in one table, a type change
+next to a drop, or a new table that matches two old ones produce no hint rather than a wrong one. Dry runs
+show the same hints. The suggestions are generated from your model, including owned types
+(`Entity<Order>().OwnsOne(e => e.Address).Property(e => e.Street)`), derived types and shadow properties.
 
 ### What happens underneath
 
