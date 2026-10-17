@@ -72,6 +72,7 @@ internal static class SchemaSynchronizer
 
         var report = await deployer.GenerateReportAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
         var dataIssues = report.DataIssues;
+        var renameHints = await FindRenameHintsAsync(connection, context, report, logger, cancellationToken).ConfigureAwait(false);
         if (report.DataIssueDetails.Count > 0 && !options.AllowDataLoss && !options.DryRun)
         {
             // Same rule DacFx applies when it executes with BlockOnPossibleDataLoss: a lossy operation only matters
@@ -79,8 +80,14 @@ internal static class SchemaSynchronizer
             var blocking = await FindBlockingDataIssuesAsync(connection, report.DataIssueDetails, logger, cancellationToken).ConfigureAwait(false);
             if (blocking.Count > 0)
             {
-                throw new SchemaChangesBlockedException(blocking, report.Operations);
+                throw new SchemaChangesBlockedException(blocking, report.Operations, renameHints);
             }
+        }
+
+        foreach (var hint in renameHints)
+        {
+            warnings.Add($"Possible undeclared rename {hint.OldName} -> {hint.NewName}. If it is one, declare it to keep the data: {hint.Suggestion}");
+            logger.LogWarning("EFCore.SchemaSync: possible undeclared rename {OldName} -> {NewName}. If it is one, declare it to keep the data: {Suggestion}", hint.OldName, hint.NewName, hint.Suggestion);
         }
 
         foreach (var alert in report.Alerts.Where(a => !string.Equals(a.Name, "DataIssue", StringComparison.OrdinalIgnoreCase)))
@@ -125,7 +132,7 @@ internal static class SchemaSynchronizer
                 ? null
                 : await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
             return new SchemaSyncResult(report.Operations.Count == 0 ? SchemaSyncOutcome.NoChangesNeeded : SchemaSyncOutcome.Previewed,
-                contextName, target.ServerName, target.DatabaseName, report.Operations, retained, dataIssues, warnings, preview, stopwatch.Elapsed);
+                contextName, target.ServerName, target.DatabaseName, report.Operations, retained, dataIssues, warnings, preview, stopwatch.Elapsed, renameHints: renameHints);
         }
 
         var executedHooks = new List<string>();
@@ -152,11 +159,11 @@ internal static class SchemaSynchronizer
 
         // 9. After-deploy hooks (schema matches the model, lock held).
         var applied = new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray());
+            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), renameHints);
         await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, report.Operations, applied, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
 
         return new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks);
+            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, renameHints);
     }
 
     private static async Task RunHooksAsync(
@@ -295,6 +302,31 @@ internal static class SchemaSynchronizer
         catch (SqlException)
         {
             return true; // cannot prove the table is empty: stay on the safe side
+        }
+    }
+
+    /// <summary>
+    /// Looks for undeclared renames, but only when the plan could contain one: a lossy change (dropped column) or a new
+    /// table. Hints are advisory, so any failure here is logged and ignored.
+    /// </summary>
+    private static async Task<IReadOnlyList<RenameHint>> FindRenameHintsAsync(SqlConnection connection, DbContext context, DeployReport report, ILogger logger, CancellationToken cancellationToken)
+    {
+        var createsTable = report.Operations.Any(o => o.Kind == SchemaChangeKind.Create && o.ObjectType == "Table");
+        if (report.DataIssueDetails.Count == 0 && !createsTable)
+        {
+            return [];
+        }
+
+        try
+        {
+            var (deployed, known) = RenameHintAnalyzer.DescribeModel(context);
+            var target = await RenameHintAnalyzer.ReadTargetAsync(connection, cancellationToken).ConfigureAwait(false);
+            return RenameHintAnalyzer.Analyze(deployed, known, target);
+        }
+        catch (Exception ex) when (ex is SqlException or InvalidOperationException)
+        {
+            logger.LogDebug(ex, "EFCore.SchemaSync: could not look for undeclared renames.");
+            return [];
         }
     }
 
