@@ -78,11 +78,13 @@ public sealed class SchemaSyncOptions
     public bool IncludeDeploymentScript { get; set; }
 
     /// <summary>
-    /// SQL Server platform the generated DACPAC targets. Default: <see cref="SqlServerVersion.Sql160"/> (SQL Server 2022).
-    /// Deploying to a newer engine is allowed; deploying to an older or different platform requires
-    /// <see cref="AllowIncompatiblePlatform"/>.
+    /// SQL Server platform the generated DACPAC targets. Default: null, which detects it from the connected server
+    /// (SQL Server 2012 to 2025 map to <see cref="SqlServerVersion.Sql110"/> to <see cref="SqlServerVersion.Sql170"/>,
+    /// Azure SQL Database to <see cref="SqlServerVersion.SqlAzure"/>, Managed Instance to <see cref="SqlServerVersion.Sql160"/>).
+    /// Set it to pin the platform, for example to build for an older engine than the one you deploy to; deploying to a
+    /// different platform than the DACPAC targets may then require <see cref="AllowIncompatiblePlatform"/>.
     /// </summary>
-    public SqlServerVersion TargetSqlServerVersion { get; set; } = SqlServerVersion.Sql160;
+    public SqlServerVersion? TargetSqlServerVersion { get; set; }
 
     /// <summary>
     /// Let DacFx deploy even when the target platform differs from <see cref="TargetSqlServerVersion"/>
