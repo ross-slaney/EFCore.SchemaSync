@@ -115,3 +115,27 @@ public sealed class SchemaChangesBlockedException : SchemaSyncException
          + "Review the changes and set AllowDataLoss = true to apply them:"
          + Environment.NewLine + "  - " + string.Join(Environment.NewLine + "  - ", risks);
 }
+
+/// <summary>
+/// The database does not match the EF model: verification found pending schema changes. Nothing was changed.
+/// <see cref="Result"/> holds the full comparison (changes, data-loss risks, deployment script).
+/// </summary>
+public sealed class SchemaDriftException : SchemaSyncException
+{
+    /// <summary>Creates the exception from a verification result with pending changes.</summary>
+    public SchemaDriftException(SchemaSyncResult result)
+        : base(SchemaSyncStage.Compare, BuildMessage(result))
+    {
+        Result = result;
+    }
+
+    /// <summary>The verification result.</summary>
+    public SchemaSyncResult Result { get; }
+
+    /// <summary>The schema changes an application would make.</summary>
+    public IReadOnlyList<SchemaChange> PendingChanges => Result.Changes;
+
+    private static string BuildMessage(SchemaSyncResult result)
+        => $"The schema of {result.ServerName}/{result.DatabaseName} does not match the model of {result.ContextName}: {result.Changes.Count} pending change(s)."
+         + Environment.NewLine + "  - " + string.Join(Environment.NewLine + "  - ", result.Changes.Select(c => c.ToString()));
+}
