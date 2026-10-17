@@ -65,18 +65,38 @@ internal static class SchemaSynchronizer
         // 4. Serialize comparison and deployment across instances.
         await using var schemaLock = await SchemaLock.AcquireAsync(connection, options.LockResourceName, options.LockTimeout, logger, cancellationToken).ConfigureAwait(false);
 
-        // 5. Compare.
+        // 5. Compare. Objects outside the context's scope (other schemas, tables excluded from migrations) are kept
+        //    out of every plan by the scope contributor.
+        var scope = DeploymentScope.Create(context, options);
+        using var scopeRegistration = scope.IsRestricted ? scope.Register() : null;
+        if (scopeRegistration is not null && DacDeployOptionsFactory.ContributorPath is null)
+        {
+            const string Problem = "the EFCore.SchemaSync assembly has no file path (single-file publish), so DacFx cannot load the scope contributor that keeps objects outside ManagedSchemas and tables excluded from migrations";
+            if (options.AllowObjectRemoval)
+            {
+                throw new SchemaSyncException(SchemaSyncStage.Compare, $"AllowObjectRemoval is refused because {Problem}. Publish without single-file bundling or turn AllowObjectRemoval off.");
+            }
+
+            warnings.Add($"Retained objects may include objects outside this context's scope because {Problem}.");
+        }
+
+        var scopeToken = scopeRegistration is not null && DacDeployOptionsFactory.ContributorPath is not null ? scopeRegistration.Token : null;
         var deployer = new SchemaDeployer(target, logger);
-        var deployOptions = DacDeployOptionsFactory.Create(options);
+        var deployOptions = DacDeployOptionsFactory.Create(options, scopeToken);
         using var dacPackage = package.LoadDacPackage();
 
         var report = await deployer.GenerateReportAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
-        var dataIssues = report.DataIssues;
-        if (report.DataIssueDetails.Count > 0 && !options.AllowDataLoss && !options.DryRun)
+
+        // DacFx raises its data-loss alerts before contributors run: drop the ones about objects the scope kept.
+        var dataIssueDetails = report.DataIssueDetails
+            .Where(issue => !scope.Removed.Any(name => issue.Message.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var dataIssues = dataIssueDetails.Select(issue => issue.Message).ToList();
+        if (dataIssueDetails.Count > 0 && !options.AllowDataLoss && !options.DryRun)
         {
             // Same rule DacFx applies when it executes with BlockOnPossibleDataLoss: a lossy operation only matters
             // when the affected table holds rows. Checking here keeps the failure deterministic and before any DDL.
-            var blocking = await FindBlockingDataIssuesAsync(connection, report.DataIssueDetails, logger, cancellationToken).ConfigureAwait(false);
+            var blocking = await FindBlockingDataIssuesAsync(connection, dataIssueDetails, logger, cancellationToken).ConfigureAwait(false);
             if (blocking.Count > 0)
             {
                 throw new SchemaChangesBlockedException(blocking, report.Operations);
@@ -88,7 +108,7 @@ internal static class SchemaSynchronizer
             warnings.AddRange(alert.Issues.Select(issue => $"{alert.Name}: {issue}"));
         }
 
-        var retained = await ComputeRetainedObjectsAsync(deployer, dacPackage, options, report, warnings, cancellationToken).ConfigureAwait(false);
+        var retained = await ComputeRetainedObjectsAsync(deployer, dacPackage, options, scopeToken, report, warnings, cancellationToken).ConfigureAwait(false);
         if (retained.Count > 0)
         {
             logger.LogWarning(
@@ -205,7 +225,7 @@ internal static class SchemaSynchronizer
     }
 
     private static async Task<IReadOnlyList<SchemaObjectReference>> ComputeRetainedObjectsAsync(
-        SchemaDeployer deployer, Microsoft.SqlServer.Dac.DacPackage dacPackage, SchemaSyncOptions options, DeployReport effectiveReport, List<string> warnings, CancellationToken cancellationToken)
+        SchemaDeployer deployer, Microsoft.SqlServer.Dac.DacPackage dacPackage, SchemaSyncOptions options, string? scopeToken, DeployReport effectiveReport, List<string> warnings, CancellationToken cancellationToken)
     {
         if (!options.ReportRetainedObjects || options.AllowObjectRemoval)
         {
@@ -214,7 +234,7 @@ internal static class SchemaSynchronizer
 
         try
         {
-            var dropEverything = DacDeployOptionsFactory.CreateForRetainedObjectsReport(options);
+            var dropEverything = DacDeployOptionsFactory.CreateForRetainedObjectsReport(options, scopeToken);
             var dropReport = await deployer.GenerateReportAsync(dacPackage, dropEverything, cancellationToken).ConfigureAwait(false);
             var plannedDrops = effectiveReport.Operations
                 .Where(c => c.Kind == SchemaChangeKind.Drop)

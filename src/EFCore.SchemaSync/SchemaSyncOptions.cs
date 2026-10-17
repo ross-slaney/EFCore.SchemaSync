@@ -58,6 +58,15 @@ public sealed class SchemaSyncOptions
     public bool AllowDataLoss { get; set; }
 
     /// <summary>
+    /// Schemas this DbContext owns when it shares the database with other contexts or applications. When set, only
+    /// target-only objects in these schemas (plus every schema the model deploys into) are reported as retained or
+    /// dropped by <see cref="AllowObjectRemoval"/>; everything in other schemas is left alone entirely. Empty (the
+    /// default) means the context owns the whole database. Tables the EF model maps but excludes from migrations
+    /// (<c>ExcludeFromMigrations()</c>) are always left alone, whatever this setting.
+    /// </summary>
+    public ICollection<string> ManagedSchemas { get; } = new List<string>();
+
+    /// <summary>
     /// Compute and report database objects that only exist in the target and were preserved
     /// (<see cref="SchemaSyncResult.RetainedObjects"/>). This costs one additional comparison pass.
     /// Default: true.
