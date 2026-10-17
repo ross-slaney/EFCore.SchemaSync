@@ -36,6 +36,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Defaults and options](#defaults-and-options)
 - [Results and errors](#results-and-errors)
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
+- [Tracing and metrics](#tracing-and-metrics)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
 - [Supported mappings (tested)](#supported-mappings-tested)
@@ -223,6 +224,37 @@ Before comparing, the library takes an exclusive `sp_getapplock` (`@LockOwner = 
 deployment has finished or failed. Other instances wait up to `LockTimeout`, then throw. Because the lock is owned by
 the session, it is released even if the process dies mid-deployment: the server releases it when the connection goes
 away. Instances that waited find no differences left and return `NoChangesNeeded`.
+
+## Tracing and metrics
+
+Every application emits an OpenTelemetry-compatible trace and metrics through `System.Diagnostics`. Subscribe with
+the names on `SchemaSyncTelemetry`:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(t => t.AddSource(SchemaSyncTelemetry.SourceName))
+    .WithMetrics(m => m.AddMeter(SchemaSyncTelemetry.MeterName));
+```
+
+**Traces.** One `EFCore.SchemaSync.Apply` activity per application, with a child per stage: `Connect`, `Convert`,
+`AcquireLock`, `Compare`, `Deploy` (only when something is deployed) and one `Hook` per hook. The root carries
+`db.system.name`, `db.namespace`, `server.address`, `efcore.schemasync.context`, `efcore.schemasync.dry_run`,
+`efcore.schemasync.outcome` and counts of changes, retained objects and data-loss risks. Failures set the activity
+status to error, record the exception, and tag `error.type` and the failing `efcore.schemasync.stage`; the failing
+stage's own activity is marked as an error too.
+
+**Metrics.**
+
+| Instrument | Type | Tags |
+| --- | --- | --- |
+| `efcore.schemasync.apply.duration` (s) | histogram | context, database, outcome (`Applied`, `NoChangesNeeded`, `Previewed`, `failed`, `cancelled`), dry run, `error.type` |
+| `efcore.schemasync.stage.duration` (s) | histogram | context, database, stage, status (`ok`/`error`) |
+| `efcore.schemasync.lock.wait` (s) | histogram | context, database |
+| `efcore.schemasync.applications` | counter | as apply duration |
+| `efcore.schemasync.changes` | counter | context, database, change kind, dry run |
+
+Without a listener the instrumentation records nothing. Connection strings and credentials are never part of
+tags. The sample exports both to the Aspire dashboard over OTLP.
 
 ## Renames and schema moves (refactor log)
 
