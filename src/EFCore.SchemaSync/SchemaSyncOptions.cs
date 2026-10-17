@@ -68,6 +68,11 @@ public sealed class SchemaSyncOptions
     public bool SkipComparisonWhenUnchanged { get; set; } = true;
 
     /// <summary>
+    /// Set by the verification APIs: a read-only dry run that may answer from the recorded fingerprint and never runs hooks.
+    /// </summary>
+    internal bool VerifyOnly { get; set; }
+
+    /// <summary>
     /// Compute and report database objects that only exist in the target and were preserved
     /// (<see cref="SchemaSyncResult.RetainedObjects"/>). This costs one additional comparison pass.
     /// Default: true.

@@ -60,4 +60,30 @@ public static class SchemaSyncServiceProviderExtensions
 
         return await SchemaSynchronizer.ApplyAsync(context, options, logger, scope.ServiceProvider, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Checks that the database matches the model of <typeparamref name="TContext"/> without changing anything: a dry run
+    /// that runs no hooks and writes no state. When the schema is unchanged since the last application with the same
+    /// options, the recorded fingerprint answers without DacFx; otherwise DacFx compares in full. Target-only objects
+    /// that would be retained do not count as drift.
+    /// </summary>
+    /// <returns>The result when the database is current.</returns>
+    /// <exception cref="SchemaDriftException">The database differs from the model.</exception>
+    /// <exception cref="SchemaSyncException">The check itself failed; <see cref="SchemaSyncException.Stage"/> names the stage.</exception>
+    public static Task<SchemaSyncResult> VerifyDatabaseSchemaAsync<TContext>(this IServiceProvider serviceProvider, CancellationToken cancellationToken = default)
+        where TContext : DbContext
+        => VerifyDatabaseSchemaAsync<TContext>(serviceProvider, static _ => { }, cancellationToken);
+
+    /// <summary>
+    /// Same as <see cref="VerifyDatabaseSchemaAsync{TContext}(IServiceProvider, CancellationToken)"/>, configured with the
+    /// options the application uses at startup (so the recorded fingerprint can answer).
+    /// </summary>
+    public static async Task<SchemaSyncResult> VerifyDatabaseSchemaAsync<TContext>(this IServiceProvider serviceProvider, Action<SchemaSyncOptions> configure, CancellationToken cancellationToken = default)
+        where TContext : DbContext
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        var options = SchemaSync.VerificationOptions(configure);
+        var result = await ApplyDatabaseSchemaAsync<TContext>(serviceProvider, options, cancellationToken).ConfigureAwait(false);
+        return result.HasChanges ? throw new SchemaDriftException(result) : result;
+    }
 }
