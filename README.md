@@ -30,6 +30,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 ## Contents
 
 - [How it works](#how-it-works)
+- [Moving from EF Core migrations](docs/migrating-from-ef-migrations.md)
 - [Getting started](#getting-started)
 - [Database permissions](#database-permissions)
 - [What happens to things that are not in the model](#what-happens-to-things-that-are-not-in-the-model)
@@ -63,7 +64,9 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 5. **Deploy or preview.** DacFx deploys the plan inside a transaction with deployment verification on, or returns
    the deployment script on a dry run.
 
-EF migrations, the migrations history table and model snapshots are not used at all.
+EF migrations, the migrations history table and model snapshots are not used at all. Coming from migrations? Follow
+the step-by-step [migration guide](docs/migrating-from-ef-migrations.md); a database built by migrations usually needs
+no changes at all.
 
 ## Getting started
 
