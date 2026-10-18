@@ -40,6 +40,8 @@ public sealed class SampleAppTests
         using var missing = await client.PostAsJsonAsync("/lists/999999/items", new { title = "nope" }, cts.Token);
         Assert.AreEqual(HttpStatusCode.NotFound, missing.StatusCode);
 
+        Assert.AreEqual("Healthy", await client.GetStringAsync("/health", cts.Token), "the schema health check reports the deployed schema as current");
+
         var sampleDb = await SqlFixture.App.GetConnectionStringAsync("sampledb", cts.Token);
         Assert.IsNotNull(sampleDb);
         var withDefaults = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(sampleDb) { TrustServerCertificate = true, Encrypt = false }.ConnectionString;
@@ -79,6 +81,27 @@ public sealed class SampleAppTests
         StringAssert.Contains(outcome.StandardOutput, "Dry run");
         StringAssert.Contains(outcome.StandardOutput, "CREATE TABLE [app].[Items]");
         Assert.AreEqual(0, await db.TableCountAsync());
+    }
+
+    [TestMethod]
+    public async Task Verify_schema_flag_exits_with_the_drift_code_until_the_schema_is_applied()
+    {
+        await using var db = await TestDatabase.CreateAsync();
+
+        var drifted = await SampleProcess.RunAsync(db.ConnectionString, "--verify-schema");
+        Assert.AreEqual(3, drifted.ExitCode, drifted.StandardOutput + drifted.StandardError);
+        StringAssert.Contains(drifted.StandardError, "pending change(s)");
+        StringAssert.Contains(drifted.StandardOutput, "CREATE TABLE [app].[Lists]", "the script an application would run is printed");
+        Assert.AreEqual(0, await db.TableCountAsync(), "verification changes nothing");
+
+        Assert.AreEqual(0, (await SampleProcess.RunAsync(db.ConnectionString, "--apply-schema")).ExitCode);
+        var current = await SampleProcess.RunAsync(db.ConnectionString, "--verify-schema");
+        Assert.AreEqual(0, current.ExitCode, current.StandardError);
+        StringAssert.Contains(current.StandardOutput, "Schema is current");
+
+        var missing = await SampleProcess.RunAsync(SqlFixture.ConnectionStringFor(db.Name + "_missing"), "--verify-schema");
+        Assert.AreEqual(1, missing.ExitCode, missing.StandardOutput);
+        StringAssert.Contains(missing.StandardError, "stage Connect");
     }
 
     [TestMethod]

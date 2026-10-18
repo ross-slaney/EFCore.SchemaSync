@@ -104,6 +104,7 @@ internal sealed class SchemaSyncRun : IDisposable
             _activity.SetTag("efcore.schemasync.changes", result.Changes.Count);
             _activity.SetTag("efcore.schemasync.retained_objects", result.RetainedObjects.Count);
             _activity.SetTag("efcore.schemasync.data_loss_risks", result.DataLossRisks.Count);
+            _activity.SetTag("efcore.schemasync.comparison_skipped", result.ComparisonSkipped);
             _activity.SetStatus(ActivityStatusCode.Ok);
         }
 

@@ -54,7 +54,8 @@ public sealed class ObservabilityTests
 
         var root = capture.Roots("db.namespace", db.Name).Single();
         Assert.AreEqual("NoChangesNeeded", root.GetTagItem("efcore.schemasync.outcome"));
-        Assert.IsFalse(Names(capture.Children(root)).Contains("Deploy"));
+        Assert.AreEqual(true, root.GetTagItem("efcore.schemasync.comparison_skipped"));
+        CollectionAssert.AreEqual(new[] { "Connect", "Convert", "AcquireLock", "Compare" }, Names(capture.Children(root)));
         Assert.AreEqual(0, capture.For(SchemaSyncTelemetry.ChangesInstrument, "db.namespace", db.Name).Count);
     }
 
