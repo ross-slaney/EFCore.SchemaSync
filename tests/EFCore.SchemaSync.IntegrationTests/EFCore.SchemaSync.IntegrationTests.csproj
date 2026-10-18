@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="..\EFCore.SchemaSync.Tests\Models\*.cs" Link="Models\%(Filename)%(Extension)" />
+    <Compile Include="..\EFCore.SchemaSync.Tests\TelemetryCapture.cs" Link="Infrastructure\TelemetryCapture.cs" />
   </ItemGroup>
 
   <ItemGroup>

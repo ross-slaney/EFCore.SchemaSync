@@ -18,6 +18,22 @@ internal static class SchemaSynchronizer
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(options);
+        using var run = SchemaSyncRun.Start(context.GetType().Name, options.DryRun);
+        try
+        {
+            var result = await ApplyCoreAsync(context, options, logger, services, run, cancellationToken).ConfigureAwait(false);
+            run.Complete(result);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            run.Fail(ex);
+            throw;
+        }
+    }
+
+    private static async Task<SchemaSyncResult> ApplyCoreAsync(DbContext context, SchemaSyncOptions options, ILogger logger, IServiceProvider? services, SchemaSyncRun run, CancellationToken cancellationToken)
+    {
         options.Validate();
 
         var stopwatch = Stopwatch.StartNew();
@@ -28,15 +44,25 @@ internal static class SchemaSynchronizer
 
         // 1. Resolve the target (provider check, connection string, database name).
         var target = TargetConnection.Resolve(context, options);
+        run.SetTarget(target);
         logger.LogInformation(
             "EFCore.SchemaSync: applying the model of {Context} to {Server}/{Database}{Mode}.",
             contextName, target.ServerName, target.DatabaseName, options.DryRun ? " (dry run)" : string.Empty);
 
         // 2. Connect. This connection owns the schema lock for the rest of the operation.
-        await using var connection = await target.OpenAsync(cancellationToken).ConfigureAwait(false);
-        var collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+        SqlConnection connection;
+        string? collation;
+        using (var stage = run.StartStage("Connect"))
+        {
+            connection = await target.OpenAsync(cancellationToken).ConfigureAwait(false);
+            collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            stage.Succeed();
+        }
+
+        await using var connectionLifetime = connection;
 
         // 3. Prepare the model: EF's create script and the refactor log. The DACPAC is only built when it is needed.
+        var convertStage = run.StartStage("Convert");
         var prepared = SchemaConverter.Prepare(context, new SchemaConversionOptions
         {
             TargetSqlServerVersion = options.TargetSqlServerVersion,
@@ -50,10 +76,23 @@ internal static class SchemaSynchronizer
         var readState = options.SkipComparisonWhenUnchanged && options.ConfigureDeployOptions is null && (!options.DryRun || options.VerifyOnly);
         var writeState = readState && !options.DryRun;
         var modelHash = readState ? ModelHash.Compute(prepared, collation, options) : null;
+        convertStage.Succeed();
+        convertStage.Dispose();
         cancellationToken.ThrowIfCancellationRequested();
 
         // 4. Serialize comparison and deployment across instances.
-        await using var schemaLock = await SchemaLock.AcquireAsync(connection, options.LockResourceName, options.LockTimeout, logger, cancellationToken).ConfigureAwait(false);
+        SchemaLock acquiredLock;
+        using (var stage = run.StartStage("AcquireLock"))
+        {
+            acquiredLock = await SchemaLock.AcquireAsync(connection, options.LockResourceName, options.LockTimeout, logger, cancellationToken).ConfigureAwait(false);
+            stage.Succeed();
+            SchemaSyncTelemetry.LockWait.Record(stage.Elapsed.TotalSeconds, run.Tags());
+        }
+
+        await using var schemaLock = acquiredLock;
+
+        // The Compare stage spans the fast-path check, the DACPAC build and the DacFx comparison.
+        using var compareStage = run.StartStage("Compare");
 
         // 5. Fast path: nothing changed since the last successful application.
         if (readState)
@@ -68,13 +107,15 @@ internal static class SchemaSynchronizer
                         "EFCore.SchemaSync: the model of {Context} and the schema of {Database} are unchanged since the last deployment; no changes needed (comparison skipped).",
                         contextName, target.DatabaseName);
                     warnings.AddRange(state.Warnings);
+                    compareStage.Succeed();
+                    compareStage.Dispose();
                     if (options.DryRun)
                     {
                         return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
                             [], state.RetainedObjects, [], warnings, deploymentScript: null, stopwatch.Elapsed, comparisonSkipped: true);
                     }
 
-                    return await FinishWithoutChangesAsync(context, options, services, target, logger, contextName, state.RetainedObjects, warnings, stopwatch, cancellationToken).ConfigureAwait(false);
+                    return await FinishWithoutChangesAsync(context, options, services, target, logger, contextName, state.RetainedObjects, warnings, stopwatch, run, cancellationToken).ConfigureAwait(false);
                 }
 
                 logger.LogDebug("EFCore.SchemaSync: the schema of {Database} changed since the last deployment; running the full comparison.", target.DatabaseName);
@@ -167,6 +208,9 @@ internal static class SchemaSynchronizer
             logger.LogWarning("EFCore.SchemaSync: possible data loss: {Issue}", issue);
         }
 
+        compareStage.Succeed();
+        compareStage.Dispose();
+
         // 8. Decide.
         if (changes.Count == 0)
         {
@@ -197,7 +241,7 @@ internal static class SchemaSynchronizer
         var executedHooks = new List<string>();
 
         // 9. Before-deploy hooks (old schema, lock held).
-        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, changes, result: null, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, changes, result: null, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
 
         string? script = null;
         var outcome = SchemaSyncOutcome.NoChangesNeeded;
@@ -209,7 +253,12 @@ internal static class SchemaSynchronizer
             }
 
             // 10. Deploy (a bookkeeping-only deployment just creates the state table; it is not reported as a change).
-            await deployer.DeployAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+            using (var stage = run.StartStage("Deploy", ("efcore.schemasync.changes", changes.Count)))
+            {
+                await deployer.DeployAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+                stage.Succeed();
+            }
+
             if (!bookkeepingOnly)
             {
                 outcome = SchemaSyncOutcome.Applied;
@@ -233,7 +282,7 @@ internal static class SchemaSynchronizer
         // 12. After-deploy hooks (schema matches the model, lock held).
         var applied = new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
             changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), renameHints: renameHints);
-        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, changes, applied, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, changes, applied, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
 
         return new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
             changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, renameHints: renameHints);
@@ -250,13 +299,14 @@ internal static class SchemaSynchronizer
         IReadOnlyList<SchemaObjectReference> retained,
         List<string> warnings,
         Stopwatch stopwatch,
+        SchemaSyncRun run,
         CancellationToken cancellationToken)
     {
         var executedHooks = new List<string>();
-        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, [], result: null, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, [], result: null, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
         var current = new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
             [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks.ToArray(), comparisonSkipped: true);
-        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, [], current, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, [], current, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
         return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
             [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks, comparisonSkipped: true);
     }
@@ -271,6 +321,7 @@ internal static class SchemaSynchronizer
         TargetConnection target,
         ILogger logger,
         List<string> executed,
+        SchemaSyncRun run,
         CancellationToken cancellationToken)
     {
         var hooks = options.Hooks.Where(h => h.Phase == phase).ToList();
@@ -285,9 +336,11 @@ internal static class SchemaSynchronizer
             cancellationToken.ThrowIfCancellationRequested();
             var started = Stopwatch.StartNew();
             logger.LogInformation("EFCore.SchemaSync: running {Phase} hook '{Hook}'.", phase, hook.Name);
+            using var hookStage = run.StartStage("Hook", (SchemaSyncTelemetry.HookTag, hook.Name), (SchemaSyncTelemetry.HookPhaseTag, phase.ToString()));
             try
             {
                 await hook.Callback(hookContext, cancellationToken).ConfigureAwait(false);
+                hookStage.Succeed();
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
