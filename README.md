@@ -600,9 +600,14 @@ an empty database, inspected through the catalog views, and a second apply must 
 | Temporal tables | `IsTemporal()` with the default history table | Tested (creation, idempotency, adding a column with history preserved) |
 | Comments | `HasComment` on tables and columns (extended properties) | Tested |
 | Seed data | `HasData` | Skipped with a warning (schema deploys); seed with an `AfterDeploy` hook instead |
-
-Other mappings built from the same primitives (TPT and TPC inheritance, many-to-many join entities, table splitting,
-JSON columns stored as `nvarchar(max)`, HiLo) are expected to work but are not part of the test matrix.
+| TPT inheritance | `UseTptMappingStrategy()` (one table per type, FK to the base row) | Tested |
+| TPC inheritance | `UseTpcMappingStrategy()` (tables per concrete type, shared key sequence) | Tested |
+| Many-to-many | skip navigations with an implicit join table | Tested |
+| Table splitting | two entity types on one table | Tested |
+| Complex types | `ComplexProperty` as columns, and `ToJson()` | Tested |
+| JSON columns | `OwnsOne(...).ToJson()`, primitive collections: `nvarchar(max)`; native `json` with compatibility level 170 on SQL Server 2025 | Tested (native `json` on the SQL Server 2025 CI leg) |
+| Vectors | `SqlVector<float>` as `vector(n)` (SQL Server 2025) | Tested on the SQL Server 2025 CI leg |
+| HiLo | `UseHiLo()` sequences | Tested |
 
 Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
 
