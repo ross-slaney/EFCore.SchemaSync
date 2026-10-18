@@ -45,15 +45,18 @@ internal static class SchemaSynchronizer
             RefactorLog = options.RefactorLog,
             RefactorLogPath = options.RefactorLogPath,
         });
-        var trackState = options.SkipComparisonWhenUnchanged && !options.DryRun && options.ConfigureDeployOptions is null;
-        var modelHash = trackState ? ModelHash.Compute(prepared, collation, options) : null;
+        // Real applications read and write the recorded state; verification reads it (a match proves the schema is
+        // exactly what a previous full comparison produced); ordinary dry runs always compare.
+        var readState = options.SkipComparisonWhenUnchanged && options.ConfigureDeployOptions is null && (!options.DryRun || options.VerifyOnly);
+        var writeState = readState && !options.DryRun;
+        var modelHash = readState ? ModelHash.Compute(prepared, collation, options) : null;
         cancellationToken.ThrowIfCancellationRequested();
 
         // 4. Serialize comparison and deployment across instances.
         await using var schemaLock = await SchemaLock.AcquireAsync(connection, options.LockResourceName, options.LockTimeout, logger, cancellationToken).ConfigureAwait(false);
 
         // 5. Fast path: nothing changed since the last successful application.
-        if (trackState)
+        if (readState)
         {
             var state = await SchemaState.TryReadAsync(connection, contextKey, logger, cancellationToken).ConfigureAwait(false);
             if (state is not null && string.Equals(state.ModelHash, modelHash, StringComparison.Ordinal))
@@ -65,6 +68,12 @@ internal static class SchemaSynchronizer
                         "EFCore.SchemaSync: the model of {Context} and the schema of {Database} are unchanged since the last deployment; no changes needed (comparison skipped).",
                         contextName, target.DatabaseName);
                     warnings.AddRange(state.Warnings);
+                    if (options.DryRun)
+                    {
+                        return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
+                            [], state.RetainedObjects, [], warnings, deploymentScript: null, stopwatch.Elapsed, comparisonSkipped: true);
+                    }
+
                     return await FinishWithoutChangesAsync(context, options, services, target, logger, contextName, state.RetainedObjects, warnings, stopwatch, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -152,7 +161,7 @@ internal static class SchemaSynchronizer
 
         if (options.DryRun)
         {
-            if (options.Hooks.Count > 0)
+            if (options.Hooks.Count > 0 && !options.VerifyOnly)
             {
                 warnings.Add($"{options.Hooks.Count} hook(s) were not run because this is a dry run.");
             }
@@ -191,7 +200,7 @@ internal static class SchemaSynchronizer
 
         // 11. Record the state for the next start's fast path (before the after-deploy hooks: DDL a hook performs is
         //     then detected as a change next time instead of being taken as the expected schema).
-        if (trackState)
+        if (writeState)
         {
             var fingerprint = await SchemaFingerprint.TryComputeAsync(connection, logger, cancellationToken).ConfigureAwait(false);
             if (fingerprint is not null)

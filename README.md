@@ -38,6 +38,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Results and errors](#results-and-errors)
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
 - [Fast restarts](#fast-restarts)
+- [Drift checks: verify, health check, pipelines](#drift-checks-verify-health-check-pipelines)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
 - [Privacy: no telemetry](#privacy-no-telemetry)
@@ -259,6 +260,43 @@ The state table is part of every deployed model: it never appears in `Changes` o
 `AllowObjectRemoval` never drops it. Writing it needs `INSERT`/`UPDATE` on it (granted by `db_datawriter` or
 `db_owner`); if the deploying principal lacks that, the library logs a warning and simply compares in full on
 every start. Set `SkipComparisonWhenUnchanged = false` to turn the fast path off.
+
+## Drift checks: verify, health check, pipelines
+
+Three ways to ask "does this database match the model?" without changing anything. All of them are read-only dry
+runs: no deployment, no hooks, no state written. When the schema is unchanged since the last application with the
+same options, the recorded fingerprint answers in milliseconds; otherwise DacFx compares in full. Target-only objects
+that would be retained are reported but are not drift.
+
+**In code or tests:**
+
+```csharp
+var result = await app.Services.VerifyDatabaseSchemaAsync<AppDbContext>(o => o.ManagedSchemas.Add("app"));
+// throws SchemaDriftException (with PendingChanges and the would-be DeploymentScript) when the database differs
+```
+
+Pass the same configuration your application uses when it applies the schema, so the fingerprint can answer.
+`SchemaSync.VerifyAsync(dbContext, ...)` is the same without dependency injection; it makes a handy assertion in
+integration tests of your own.
+
+**Health check:**
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddSchemaSyncHealthCheck<AppDbContext>(configure: o => o.Configure = ConfigureSchema);
+```
+
+Healthy when the schema matches, `Degraded` (configurable through `DriftStatus`) when changes are pending, and
+the registration's failure status (Unhealthy by default) when the check cannot run. Results are cached for
+`CacheDuration` (default one minute) and the data dictionary carries `pendingChanges`, `retainedObjects` and
+`comparisonSkipped`. The check logs nothing and never exposes credentials.
+
+**Pipelines:** the sample's `--verify-schema` mode exits 0 when the database is current, 3 when it has drifted
+(printing the pending changes and the script an application would run) and 1 when the check fails:
+
+```bash
+dotnet MyApp.dll --verify-schema || echo "schema drift or failure"
+```
 
 ## Renames and schema moves (refactor log)
 

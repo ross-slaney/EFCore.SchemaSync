@@ -10,7 +10,8 @@ var connectionString = builder.Configuration.GetConnectionString("sampledb")
     ?? throw new InvalidOperationException("Connection string 'sampledb' is not configured. Run the app through SchemaSync.Sample.AppHost or set ConnectionStrings__sampledb.");
 
 builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlServer(connectionString));
-builder.Services.AddHealthChecks();
+builder.Services.AddHealthChecks()
+    .AddSchemaSyncHealthCheck<AppDbContext>(configure: o => o.Configure = SampleSchema.Configure);
 
 var app = builder.Build();
 
