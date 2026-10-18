@@ -75,10 +75,12 @@ public sealed class SchemaSyncResult
         string? deploymentScript,
         TimeSpan duration,
         IReadOnlyList<string>? executedHooks = null,
-        bool comparisonSkipped = false)
+        bool comparisonSkipped = false,
+        IReadOnlyList<RenameHint>? renameHints = null)
     {
         ExecutedHooks = executedHooks ?? [];
         ComparisonSkipped = comparisonSkipped;
+        RenameHints = renameHints ?? [];
         Outcome = outcome;
         ContextName = contextName;
         ServerName = serverName;
@@ -139,6 +141,12 @@ public sealed class SchemaSyncResult
     /// <see cref="Warnings"/> are then those recorded by that application.
     /// </summary>
     public bool ComparisonSkipped { get; }
+
+    /// <summary>
+    /// Changes that look like undeclared renames (for example a new, empty table next to a retained table with the
+    /// same columns), with the configuration line that declares each one. Also listed in <see cref="Warnings"/>.
+    /// </summary>
+    public IReadOnlyList<RenameHint> RenameHints { get; }
 
     /// <summary>True when at least one schema operation was planned or applied.</summary>
     public bool HasChanges => Changes.Count > 0;
