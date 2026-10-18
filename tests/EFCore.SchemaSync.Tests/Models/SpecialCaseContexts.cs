@@ -76,6 +76,24 @@ public sealed class DefaultSchemaDbContext(DbContextOptions<DefaultSchemaDbConte
     }
 }
 
+/// <summary>A context that maps a table it does not own (like SqlOS tables): known to the model, never deployed.</summary>
+public sealed class ExcludedTableDbContext(DbContextOptions<ExcludedTableDbContext> options) : DbContext(options)
+{
+    public DbSet<Widget> Widgets => Set<Widget>();
+
+    public DbSet<Gadget> Gadgets => Set<Gadget>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Widget>().ToTable("Widgets", t => t.ExcludeFromMigrations());
+        modelBuilder.Entity<Gadget>(e =>
+        {
+            e.ToTable("Gadgets");
+            e.Ignore(g => g.Dimensions);
+        });
+    }
+}
+
 /// <summary>Model with rename annotations: a renamed column, a renamed and moved table, and an owned type column rename.</summary>
 public sealed class RenamedDbContext(DbContextOptions<RenamedDbContext> options) : DbContext(options)
 {

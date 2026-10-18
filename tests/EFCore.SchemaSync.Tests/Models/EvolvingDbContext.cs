@@ -36,6 +36,9 @@ public sealed record SchemaShape
     /// <summary>Default value for Customers.Priority (null = no default).</summary>
     public int? PriorityDefault { get; init; } = 3;
 
+    /// <summary>Column name of the Email property.</summary>
+    public string EmailColumn { get; init; } = "Email";
+
     /// <summary>Column name of the Phone property (rename it to exercise refactor operations).</summary>
     public string PhoneColumn { get; init; } = "Phone";
 
@@ -127,7 +130,7 @@ public sealed class EvolvingDbContext(DbContextOptions<EvolvingDbContext> option
             }
 
             e.Property(p => p.Name).HasMaxLength(Shape.NameLength);
-            e.Property(p => p.Email).HasMaxLength(320);
+            e.Property(p => p.Email).HasMaxLength(320).HasColumnName(Shape.EmailColumn);
 
             if (Shape.Phone)
             {
