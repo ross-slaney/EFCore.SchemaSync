@@ -36,6 +36,7 @@ internal static class ModelHash
         Add(options.AllowObjectRemoval.ToString());
         Add(options.ReportRetainedObjects.ToString());
         Add(options.UseTransaction.ToString());
+        Add(string.Join("|", options.ManagedSchemas.Select(schema => schema.ToUpperInvariant()).Order(StringComparer.Ordinal)));
         Add(prepared.CreateScript);
         Add(prepared.RefactorLog.ToXml());
         return Convert.ToHexString(hash.GetHashAndReset());

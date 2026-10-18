@@ -39,6 +39,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
 - [Fast restarts](#fast-restarts)
 - [Drift checks: verify, health check, pipelines](#drift-checks-verify-health-check-pipelines)
+- [Sharing a database](#sharing-a-database)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
 - [Privacy: no telemetry](#privacy-no-telemetry)
@@ -175,6 +176,7 @@ Every default is the safe one. `SchemaSyncOptions`:
 | `AllowObjectRemoval` | `false` | Drop target-only objects (see above). Security objects are never dropped. |
 | `AllowDataLoss` | `false` | Permit changes DacFx flags as potentially lossy. |
 | `SkipComparisonWhenUnchanged` | `true` | Skip DacFx entirely when the model and the schema are unchanged since the last successful application (see [Fast restarts](#fast-restarts)). |
+| `ManagedSchemas` | empty (whole database) | Schemas this context owns when it shares the database. Objects in other schemas are never reported or dropped (see [Sharing a database](#sharing-a-database)). |
 | `ReportRetainedObjects` | `true` | Run the extra comparison that lists preserved target-only objects. |
 | `UseTransaction` | `true` | Transactional deployment script (`SET XACT_ABORT ON`, one transaction). SQL Server cannot roll back every DDL statement, so this is best effort, not a universal guarantee. |
 | `IncludeDeploymentScript` | `false` | Also return the executed script on real deployments. Dry runs always return it. |
@@ -297,6 +299,35 @@ the registration's failure status (Unhealthy by default) when the check cannot r
 ```bash
 dotnet MyApp.dll --verify-schema || echo "schema drift or failure"
 ```
+
+## Sharing a database
+
+By default a DbContext owns the whole database: every object it does not map is reported as retained, and
+`AllowObjectRemoval` drops it. Two mechanisms narrow that ownership when other contexts, libraries or teams use
+the same database.
+
+**Separate schemas: `ManagedSchemas`.** Give each context its own schema and list it:
+
+```csharp
+await app.Services.ApplyDatabaseSchemaAsync<BillingContext>(o => o.ManagedSchemas.Add("billing"));
+await app.Services.ApplyDatabaseSchemaAsync<ShippingContext>(o => o.ManagedSchemas.Add("shipping"));
+```
+
+Objects in other schemas are then never reported as retained, never dropped (even with `AllowObjectRemoval` and
+`AllowDataLoss`), and their data never blocks a deployment. Every schema the model deploys into is always managed,
+listed or not. Target-only objects inside the managed schemas (an index a DBA added, an old table) are still
+reported and removable as before.
+
+**Tables you map but don't own: `ExcludeFromMigrations`.** Libraries that ship their own tables inside your
+DbContext (SqlOS, for example) mark them with `ToTable("...", t => t.ExcludeFromMigrations())`. EFCore.SchemaSync
+never deploys those tables, and now also never reports or drops them or anything that hangs off them (indexes,
+constraints, defaults, triggers), whatever the other options say.
+
+Both are enforced inside DacFx: the library loads a small deployment plan modifier from its own assembly that
+removes the out-of-scope drops (and DacFx's "deployment will halt if the table contains data" checks for them)
+before DacFx reports, scripts or executes the plan. Dry runs show exactly the scoped plan. Two contexts that share
+one schema (both in `dbo`, say) are not supported: give each its own schema. In a single-file published app the
+modifier cannot be loaded; the library then refuses `AllowObjectRemoval` instead of risking foreign objects.
 
 ## Renames and schema moves (refactor log)
 
@@ -515,8 +546,8 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
 
 ## Limitations
 
-- **SQL Server only**, one `DbContext` per database schema. Two contexts deploying into the same database would each
-  treat the other's tables as target-only objects (preserved, but reported every time).
+- **SQL Server only**, one `DbContext` per database schema. Contexts sharing a database need their own schemas and
+  `ManagedSchemas` (see [Sharing a database](#sharing-a-database)).
 - **No rename inference, backfills or built-in seeding.** Renames must be declared (see the refactor log section); undeclared renames are drop-and-add. Data fixes and seed data are your code, run through deploy hooks.
 - **Views, functions, procedures and triggers are not created** because EF Core does not create them either. Entities
   mapped with `ToView` need the view to exist already. Existing ones are preserved.
