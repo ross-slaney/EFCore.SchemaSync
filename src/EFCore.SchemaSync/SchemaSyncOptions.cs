@@ -58,6 +58,30 @@ public sealed class SchemaSyncOptions
     public bool AllowDataLoss { get; set; }
 
     /// <summary>
+    /// Schemas this DbContext owns when it shares the database with other contexts or applications. When set, only
+    /// target-only objects in these schemas (plus every schema the model deploys into) are reported as retained or
+    /// dropped by <see cref="AllowObjectRemoval"/>; everything in other schemas is left alone entirely. Empty (the
+    /// default) means the context owns the whole database. Tables the EF model maps but excludes from migrations
+    /// (<c>ExcludeFromMigrations()</c>) are always left alone, whatever this setting.
+    /// </summary>
+    public ICollection<string> ManagedSchemas { get; } = new List<string>();
+
+    /// <summary>
+    /// Skip the DacFx comparison on a start where nothing changed. After every successful application the library
+    /// stores a hash of the model and a fingerprint of the schema in <c>dbo.__SchemaSyncState</c>; when both still
+    /// match, DacFx is not invoked and the result reports <see cref="SchemaSyncOutcome.NoChangesNeeded"/> with
+    /// <see cref="SchemaSyncResult.ComparisonSkipped"/> set. Any model change, deployment-option change, library upgrade
+    /// or DDL against the database (by anyone) runs the full comparison again. Dry runs always compare, and so does every
+    /// start while <see cref="ConfigureDeployOptions"/> is set (its effect cannot be hashed). Default: true.
+    /// </summary>
+    public bool SkipComparisonWhenUnchanged { get; set; } = true;
+
+    /// <summary>
+    /// Set by the verification APIs: a read-only dry run that may answer from the recorded fingerprint and never runs hooks.
+    /// </summary>
+    internal bool VerifyOnly { get; set; }
+
+    /// <summary>
     /// Compute and report database objects that only exist in the target and were preserved
     /// (<see cref="SchemaSyncResult.RetainedObjects"/>). This costs one additional comparison pass.
     /// Default: true.

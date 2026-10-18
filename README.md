@@ -30,15 +30,21 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 ## Contents
 
 - [How it works](#how-it-works)
+- [Moving from EF Core migrations](docs/migrating-from-ef-migrations.md)
 - [Getting started](#getting-started)
 - [Database permissions](#database-permissions)
 - [What happens to things that are not in the model](#what-happens-to-things-that-are-not-in-the-model)
 - [Defaults and options](#defaults-and-options)
 - [Results and errors](#results-and-errors)
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
+- [Fast restarts](#fast-restarts)
+- [Drift checks: verify, health check, pipelines](#drift-checks-verify-health-check-pipelines)
+- [Sharing a database](#sharing-a-database)
+- [Tracing and metrics](#tracing-and-metrics)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
 - [Supported platforms](#supported-platforms)
+- [Privacy: no telemetry](#privacy-no-telemetry)
 - [Supported mappings (tested)](#supported-mappings-tested)
 - [Limitations](#limitations)
 - [Sample application and Aspire](#sample-application-and-aspire)
@@ -64,7 +70,9 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 5. **Deploy or preview.** DacFx deploys the plan inside a transaction with deployment verification on, or returns
    the deployment script on a dry run.
 
-EF migrations, the migrations history table and model snapshots are not used at all.
+EF migrations, the migrations history table and model snapshots are not used at all. Coming from migrations? Follow
+the step-by-step [migration guide](docs/migrating-from-ef-migrations.md); a database built by migrations usually needs
+no changes at all.
 
 ## Getting started
 
@@ -169,6 +177,8 @@ Every default is the safe one. `SchemaSyncOptions`:
 | `LongRunningCommandTimeout` | same as `CommandTimeout` | DacFx timeout for long-running statements such as index builds. |
 | `AllowObjectRemoval` | `false` | Drop target-only objects (see above). Security objects are never dropped. |
 | `AllowDataLoss` | `false` | Permit changes DacFx flags as potentially lossy. |
+| `SkipComparisonWhenUnchanged` | `true` | Skip DacFx entirely when the model and the schema are unchanged since the last successful application (see [Fast restarts](#fast-restarts)). |
+| `ManagedSchemas` | empty (whole database) | Schemas this context owns when it shares the database. Objects in other schemas are never reported or dropped (see [Sharing a database](#sharing-a-database)). |
 | `ReportRetainedObjects` | `true` | Run the extra comparison that lists preserved target-only objects. |
 | `UseTransaction` | `true` | Transactional deployment script (`SET XACT_ABORT ON`, one transaction). SQL Server cannot roll back every DDL statement, so this is best effort, not a universal guarantee. |
 | `IncludeDeploymentScript` | `false` | Also return the executed script on real deployments. Dry runs always return it. |
@@ -201,6 +211,8 @@ plus `IgnorePermissions`, `IgnoreRoleMembership`, `IgnoreUserSettingsObjects`, `
 | `Warnings` | Conversion and comparison warnings, for example skipped seed data. |
 | `DeploymentScript` | The SQLCMD-mode script (dry runs, or `IncludeDeploymentScript`). |
 | `ExecutedHooks` | Names of the hooks that ran, in order. Empty on dry runs. |
+| `ComparisonSkipped` | True when nothing changed since the last application, so DacFx was not invoked. |
+| `RenameHints` | Changes that look like undeclared renames, with the `WasRenamedFrom` line that declares each one. |
 | `ContextName`, `ServerName`, `DatabaseName`, `Duration` | What was applied where, and how long it took including the lock wait. |
 | `Describe()` | Multi-line summary for logs and consoles. |
 
@@ -224,6 +236,131 @@ Before comparing, the library takes an exclusive `sp_getapplock` (`@LockOwner = 
 deployment has finished or failed. Other instances wait up to `LockTimeout`, then throw. Because the lock is owned by
 the session, it is released even if the process dies mid-deployment: the server releases it when the connection goes
 away. Instances that waited find no differences left and return `NoChangesNeeded`.
+
+## Fast restarts
+
+Most starts change nothing, yet a full DacFx comparison reads the whole live schema and builds a model of it,
+which costs seconds (more on large databases). After every successful application the library therefore
+records two hashes in its own table, `dbo.__SchemaSyncState` (one row per DbContext):
+
+- a **model hash** over EF's create script, the refactor log, the database collation, the target platform (detected or pinned),
+  the deployment-relevant options (`AllowDataLoss`, `AllowObjectRemoval`, `ReportRetainedObjects`,
+  `UseTransaction`, platform settings) and the library version;
+- a **schema fingerprint** over the catalog views that describe everything DacFx compares: objects with their
+  modify dates, columns, computed columns, defaults, check constraints, indexes and index columns, foreign
+  keys, identity settings, sequences, module text, extended properties, temporal settings, user types and
+  synonyms.
+
+On the next start, under the schema lock, both are recomputed. If they match, DacFx is not loaded at all, the
+result is `NoChangesNeeded` with `ComparisonSkipped = true`, and `RetainedObjects`/`Warnings` are the ones
+recorded last time. Hooks still run.
+
+Anything else runs the full comparison: a model change, an option change, a library upgrade, or any DDL against
+the database by anyone (an added index, a dropped default, a new view, `sp_rename`, an extended property).
+Data changes do not. Dry runs always compare, and so does every start while `ConfigureDeployOptions` is set,
+because the effect of a callback cannot be hashed.
+
+The state table is part of every deployed model: it never appears in `Changes` or `RetainedObjects` and
+`AllowObjectRemoval` never drops it. Writing it needs `INSERT`/`UPDATE` on it (granted by `db_datawriter` or
+`db_owner`); if the deploying principal lacks that, the library logs a warning and simply compares in full on
+every start. Set `SkipComparisonWhenUnchanged = false` to turn the fast path off.
+
+## Drift checks: verify, health check, pipelines
+
+Three ways to ask "does this database match the model?" without changing anything. All of them are read-only dry
+runs: no deployment, no hooks, no state written. When the schema is unchanged since the last application with the
+same options, the recorded fingerprint answers in milliseconds; otherwise DacFx compares in full. Target-only objects
+that would be retained are reported but are not drift.
+
+**In code or tests:**
+
+```csharp
+var result = await app.Services.VerifyDatabaseSchemaAsync<AppDbContext>(o => o.ManagedSchemas.Add("app"));
+// throws SchemaDriftException (with PendingChanges and the would-be DeploymentScript) when the database differs
+```
+
+Pass the same configuration your application uses when it applies the schema, so the fingerprint can answer.
+`SchemaSync.VerifyAsync(dbContext, ...)` is the same without dependency injection; it makes a handy assertion in
+integration tests of your own.
+
+**Health check:**
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddSchemaSyncHealthCheck<AppDbContext>(configure: o => o.Configure = ConfigureSchema);
+```
+
+Healthy when the schema matches, `Degraded` (configurable through `DriftStatus`) when changes are pending, and
+the registration's failure status (Unhealthy by default) when the check cannot run. Results are cached for
+`CacheDuration` (default one minute) and the data dictionary carries `pendingChanges`, `retainedObjects` and
+`comparisonSkipped`. The check logs nothing and never exposes credentials.
+
+**Pipelines:** the sample's `--verify-schema` mode exits 0 when the database is current, 3 when it has drifted
+(printing the pending changes and the script an application would run) and 1 when the check fails:
+
+```bash
+dotnet MyApp.dll --verify-schema || echo "schema drift or failure"
+```
+
+## Sharing a database
+
+By default a DbContext owns the whole database: every object it does not map is reported as retained, and
+`AllowObjectRemoval` drops it. Two mechanisms narrow that ownership when other contexts, libraries or teams use
+the same database.
+
+**Separate schemas: `ManagedSchemas`.** Give each context its own schema and list it:
+
+```csharp
+await app.Services.ApplyDatabaseSchemaAsync<BillingContext>(o => o.ManagedSchemas.Add("billing"));
+await app.Services.ApplyDatabaseSchemaAsync<ShippingContext>(o => o.ManagedSchemas.Add("shipping"));
+```
+
+Objects in other schemas are then never reported as retained, never dropped (even with `AllowObjectRemoval` and
+`AllowDataLoss`), and their data never blocks a deployment. Every schema the model deploys into is always managed,
+listed or not. Target-only objects inside the managed schemas (an index a DBA added, an old table) are still
+reported and removable as before.
+
+**Tables you map but don't own: `ExcludeFromMigrations`.** Libraries that ship their own tables inside your
+DbContext (SqlOS, for example) mark them with `ToTable("...", t => t.ExcludeFromMigrations())`. EFCore.SchemaSync
+never deploys those tables, and now also never reports or drops them or anything that hangs off them (indexes,
+constraints, defaults, triggers), whatever the other options say.
+
+Both are enforced inside DacFx: the library loads a small deployment plan modifier from its own assembly that
+removes the out-of-scope drops (and DacFx's "deployment will halt if the table contains data" checks for them)
+before DacFx reports, scripts or executes the plan. Dry runs show exactly the scoped plan. Two contexts that share
+one schema (both in `dbo`, say) are not supported: give each its own schema. In a single-file published app the
+modifier cannot be loaded; the library then refuses `AllowObjectRemoval` instead of risking foreign objects.
+
+## Tracing and metrics
+
+Every application emits an OpenTelemetry-compatible trace and metrics through `System.Diagnostics`. Subscribe with
+the names on `SchemaSyncTelemetry`:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(t => t.AddSource(SchemaSyncTelemetry.SourceName))
+    .WithMetrics(m => m.AddMeter(SchemaSyncTelemetry.MeterName));
+```
+
+**Traces.** One `EFCore.SchemaSync.Apply` activity per application, with a child per stage: `Connect`, `Convert`,
+`AcquireLock`, `Compare`, `Deploy` (only when something is deployed) and one `Hook` per hook. The root carries
+`db.system.name`, `db.namespace`, `server.address`, `efcore.schemasync.context`, `efcore.schemasync.dry_run`,
+`efcore.schemasync.outcome`, `efcore.schemasync.comparison_skipped` (the fast path answered) and counts of changes, retained objects and data-loss risks. Failures set the activity
+status to error, record the exception, and tag `error.type` and the failing `efcore.schemasync.stage`; the failing
+stage's own activity is marked as an error too.
+
+**Metrics.**
+
+| Instrument | Type | Tags |
+| --- | --- | --- |
+| `efcore.schemasync.apply.duration` (s) | histogram | context, database, outcome (`Applied`, `NoChangesNeeded`, `Previewed`, `failed`, `cancelled`), dry run, `error.type` |
+| `efcore.schemasync.stage.duration` (s) | histogram | context, database, stage, status (`ok`/`error`) |
+| `efcore.schemasync.lock.wait` (s) | histogram | context, database |
+| `efcore.schemasync.applications` | counter | as apply duration |
+| `efcore.schemasync.changes` | counter | context, database, change kind, dry run |
+
+Without a listener the instrumentation records nothing. Connection strings and credentials are never part of
+tags. The sample exports both to the Aspire dashboard over OTLP.
 
 ## Renames and schema moves (refactor log)
 
@@ -261,6 +398,29 @@ Applied 1 change(s) for AppDbContext on localhost/app in 3.1s.
 
 and the rows keep their values under the new name. The same change without the annotation throws
 `SchemaChangesBlockedException` and leaves the database untouched.
+
+### If you forget the annotation
+
+The library never guesses a rename, but it recognizes the shape of one and tells you the line to add:
+
+- **Column:** a column the model no longer maps next to a new column of the same base type in the same table.
+  On a populated table the deployment is blocked as data loss, and `SchemaChangesBlockedException` lists the
+  hint in its message and in `RenameHints`:
+
+  ```text
+  If this is a rename, declare it so the data is kept and the change is applied in place:
+    - [dbo].[Customers].[Phone] -> [dbo].[Customers].[PhoneNumber]: modelBuilder.Entity<Customer>().Property(e => e.PhoneNumber).WasRenamedFrom("Phone");
+  ```
+
+- **Table:** a new table whose columns equal those of a table the model no longer maps. Without the annotation
+  the deployment creates the new, empty table and keeps the old one with all the data, which is easy to miss,
+  so the result carries a warning and `SchemaSyncResult.RenameHints` holds the suggestion
+  (`modelBuilder.Entity<Customer>().WasRenamedFrom("Customers");`, with the previous schema when it moved).
+
+Hints only appear for one-to-one matches. Two renamed columns of the same type in one table, a type change
+next to a drop, or a new table that matches two old ones produce no hint rather than a wrong one. Dry runs
+show the same hints. The suggestions are generated from your model, including owned types
+(`Entity<Order>().OwnsOne(e => e.Address).Property(e => e.Street)`), derived types and shadow properties.
 
 ### What happens underneath
 
@@ -403,6 +563,18 @@ does the same from repository secrets (`SCHEMASYNC_AZURE_SQL_CONNECTION_STRING`,
 `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` for OIDC login to fetch the token) and skips when they are missing.
 Entra ID access tokens set on the DbContext's `SqlConnection` are forwarded to DacFx.
 
+## Privacy: no telemetry
+
+EFCore.SchemaSync sends nothing anywhere. DacFx, which it uses for comparison and deployment, contains an
+Application Insights client, but in the DacFx version this package references (170.5.96) that client only starts
+after an application calls `Microsoft.SqlServer.Dac.DacServices.EnableTelemetry(...)`. The library never calls it.
+
+This was verified against SQL Server: after real deployments DacFx's telemetry session is still unconfigured
+and no request reaches Application Insights. The integration suite repeats both checks on every run, so a
+DacFx upgrade that changed the default would fail CI before it ships. If your own application enables DacFx
+telemetry, deployments made through this library are included in it like any other DacFx operation; call
+`DacServices.DisableTelemetry()` to turn it off again.
+
 ## Supported mappings (tested)
 
 Every row is exercised by the integration tests against a real SQL Server 2022 container: the object is created in
@@ -445,8 +617,8 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
 
 ## Limitations
 
-- **SQL Server only**, one `DbContext` per database schema. Two contexts deploying into the same database would each
-  treat the other's tables as target-only objects (preserved, but reported every time).
+- **SQL Server only**, one `DbContext` per database schema. Contexts sharing a database need their own schemas and
+  `ManagedSchemas` (see [Sharing a database](#sharing-a-database)).
 - **No rename inference, backfills or built-in seeding.** Renames must be declared (see the refactor log section); undeclared renames are drop-and-add. Data fixes and seed data are your code, run through deploy hooks.
 - **Views, functions, procedures and triggers are not created** because EF Core does not create them either. Entities
   mapped with `ToView` need the view to exist already. Existing ones are preserved.
@@ -458,8 +630,9 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
   SQLCMD mode if you execute it by hand.
 - **Azure SQL Database, Managed Instance and SQL Server 2019 and earlier are not tested in CI.** The Azure SQL
   Database tests exist but run only when configured (see [Supported platforms](#supported-platforms)).
-- **Startup cost.** Converting the model and running the DacFx comparison takes a few seconds (two comparisons when
-  `ReportRetainedObjects` is on). DacFx brings a number of transitive package dependencies.
+- **Startup cost.** When something changed, converting the model and running the DacFx comparison takes a few
+  seconds (two comparisons when `ReportRetainedObjects` is on). Unchanged restarts skip it (see
+  [Fast restarts](#fast-restarts)). DacFx brings a number of transitive package dependencies.
 
 ## Sample application and Aspire
 

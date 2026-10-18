@@ -13,9 +13,25 @@ public static class SchemaConverter
     /// <exception cref="SchemaSyncException">The context is not configured for SQL Server, EF Core could not generate the script, or DacFx rejected the model.</exception>
     /// <exception cref="UnsupportedSchemaException">The model emits constructs the library cannot deploy declaratively.</exception>
     public static SchemaPackage Convert(DbContext context, SchemaConversionOptions? options = null)
+        => Prepare(context, options ?? new SchemaConversionOptions()).Build();
+
+    /// <summary>
+    /// Converts an EF Core create script (the output of <c>DbContext.Database.GenerateCreateScript()</c> for the
+    /// SQL Server provider) into a DACPAC. Exposed for tests and diagnostics.
+    /// </summary>
+    public static SchemaPackage ConvertScript(string createScript, string packageName, SchemaConversionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(createScript);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageName);
+        options ??= new SchemaConversionOptions();
+        return new PreparedSchema(createScript, MergeRefactorLog(new RefactorLog(), options), packageName, options).Build();
+    }
+
+    /// <summary>Generates EF's create script and the merged refactor log without building the DACPAC yet.</summary>
+    internal static PreparedSchema Prepare(DbContext context, SchemaConversionOptions options)
     {
         ArgumentNullException.ThrowIfNull(context);
-        options ??= new SchemaConversionOptions();
+        ArgumentNullException.ThrowIfNull(options);
 
         if (!context.Database.IsSqlServer())
         {
@@ -35,21 +51,11 @@ public static class SchemaConverter
         }
 
         var refactorLog = options.UseModelAnnotations ? RefactorLogBuilder.FromModel(context.Model) : new RefactorLog();
-        return ConvertScript(createScript, options.PackageName ?? context.GetType().Name, options, refactorLog);
+        return new PreparedSchema(createScript, MergeRefactorLog(refactorLog, options), options.PackageName ?? context.GetType().Name, options);
     }
 
-    /// <summary>
-    /// Converts an EF Core create script (the output of <c>DbContext.Database.GenerateCreateScript()</c> for the
-    /// SQL Server provider) into a DACPAC. Exposed for tests and diagnostics.
-    /// </summary>
-    public static SchemaPackage ConvertScript(string createScript, string packageName, SchemaConversionOptions? options = null)
-        => ConvertScript(createScript, packageName, options ?? new SchemaConversionOptions(), new RefactorLog());
-
-    private static SchemaPackage ConvertScript(string createScript, string packageName, SchemaConversionOptions options, RefactorLog refactorLog)
+    private static RefactorLog MergeRefactorLog(RefactorLog refactorLog, SchemaConversionOptions options)
     {
-        ArgumentNullException.ThrowIfNull(createScript);
-        ArgumentException.ThrowIfNullOrWhiteSpace(packageName);
-
         if (options.RefactorLog is { } explicitLog)
         {
             refactorLog.AddRange(explicitLog.Operations);
@@ -67,7 +73,6 @@ public static class SchemaConverter
             }
         }
 
-        var normalized = SqlServerScriptNormalizer.Normalize(createScript);
-        return DacpacBuilder.Build(normalized, packageName, options.TargetSqlServerVersion, options.Collation, refactorLog);
+        return refactorLog;
     }
 }
