@@ -49,7 +49,8 @@ internal static class SqlServerScriptNormalizer
 
     private static TSqlScript Parse(string text, string what)
     {
-        var parser = new TSql160Parser(initialQuotedIdentifiers: true);
+        // The newest parser accepts every older dialect EF emits and also the SQL Server 2025 types (json, vector).
+        var parser = new TSql170Parser(initialQuotedIdentifiers: true);
         TSqlFragment fragment;
         IList<ParseError> errors;
         using (var reader = new StringReader(text))

@@ -76,11 +76,13 @@ public sealed class SchemaSyncResult
         TimeSpan duration,
         IReadOnlyList<string>? executedHooks = null,
         bool comparisonSkipped = false,
-        IReadOnlyList<RenameHint>? renameHints = null)
+        IReadOnlyList<RenameHint>? renameHints = null,
+        Microsoft.SqlServer.Dac.Model.SqlServerVersion? targetPlatform = null)
     {
         ExecutedHooks = executedHooks ?? [];
         ComparisonSkipped = comparisonSkipped;
         RenameHints = renameHints ?? [];
+        TargetPlatform = targetPlatform;
         Outcome = outcome;
         ContextName = contextName;
         ServerName = serverName;
@@ -147,6 +149,9 @@ public sealed class SchemaSyncResult
     /// same columns), with the configuration line that declares each one. Also listed in <see cref="Warnings"/>.
     /// </summary>
     public IReadOnlyList<RenameHint> RenameHints { get; }
+
+    /// <summary>The DacFx platform the DACPAC targeted: detected from the server unless <see cref="SchemaSyncOptions.TargetSqlServerVersion"/> was set.</summary>
+    public Microsoft.SqlServer.Dac.Model.SqlServerVersion? TargetPlatform { get; }
 
     /// <summary>True when at least one schema operation was planned or applied.</summary>
     public bool HasChanges => Changes.Count > 0;

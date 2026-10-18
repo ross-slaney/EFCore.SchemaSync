@@ -13,26 +13,27 @@ public sealed class FastPathTests
     [TestMethod]
     public void Model_hash_is_stable_for_identical_inputs()
     {
-        Assert.AreEqual(ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions()), ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions()));
-        Assert.AreEqual(64, ModelHash.Compute(Prepared(), null, new SchemaSyncOptions()).Length);
+        Assert.AreEqual(ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions()), ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions()));
+        Assert.AreEqual(64, ModelHash.Compute(Prepared(), null, SqlServerVersion.Sql160, new SchemaSyncOptions()).Length);
     }
 
     [TestMethod]
     public void Model_hash_changes_with_everything_that_affects_a_deployment()
     {
-        var baseline = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions());
+        var baseline = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions());
         var variants = new Dictionary<string, string>
         {
-            ["script"] = ModelHash.Compute(Prepared("CREATE TABLE [T] ([Id] bigint NOT NULL);"), "Latin1_General_CI_AS", new SchemaSyncOptions()),
-            ["refactor log"] = ModelHash.Compute(Prepared(log: new RefactorLog().RenameTable("dbo", "A", "T")), "Latin1_General_CI_AS", new SchemaSyncOptions()),
-            ["collation"] = ModelHash.Compute(Prepared(), "Latin1_General_CS_AS", new SchemaSyncOptions()),
-            ["no collation"] = ModelHash.Compute(Prepared(), null, new SchemaSyncOptions()),
-            ["AllowDataLoss"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions { AllowDataLoss = true }),
-            ["AllowObjectRemoval"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions { AllowObjectRemoval = true }),
-            ["ReportRetainedObjects"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions { ReportRetainedObjects = false }),
-            ["UseTransaction"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions { UseTransaction = false }),
-            ["TargetSqlServerVersion"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions { TargetSqlServerVersion = SqlServerVersion.Sql150 }),
-            ["AllowIncompatiblePlatform"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", new SchemaSyncOptions { AllowIncompatiblePlatform = true }),
+            ["script"] = ModelHash.Compute(Prepared("CREATE TABLE [T] ([Id] bigint NOT NULL);"), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions()),
+            ["refactor log"] = ModelHash.Compute(Prepared(log: new RefactorLog().RenameTable("dbo", "A", "T")), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions()),
+            ["collation"] = ModelHash.Compute(Prepared(), "Latin1_General_CS_AS", SqlServerVersion.Sql160, new SchemaSyncOptions()),
+            ["no collation"] = ModelHash.Compute(Prepared(), null, SqlServerVersion.Sql160, new SchemaSyncOptions()),
+            ["AllowDataLoss"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions { AllowDataLoss = true }),
+            ["AllowObjectRemoval"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions { AllowObjectRemoval = true }),
+            ["ReportRetainedObjects"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions { ReportRetainedObjects = false }),
+            ["UseTransaction"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions { UseTransaction = false }),
+            ["platform"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql150, new SchemaSyncOptions()),
+            ["ManagedSchemas"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, ManagedSchemas("billing")),
+            ["AllowIncompatiblePlatform"] = ModelHash.Compute(Prepared(), "Latin1_General_CI_AS", SqlServerVersion.Sql160, new SchemaSyncOptions { AllowIncompatiblePlatform = true }),
         };
 
         foreach (var (input, hash) in variants)
@@ -46,10 +47,10 @@ public sealed class FastPathTests
     [TestMethod]
     public void Options_that_do_not_change_the_schema_do_not_change_the_hash()
     {
-        var baseline = ModelHash.Compute(Prepared(), null, new SchemaSyncOptions());
+        var baseline = ModelHash.Compute(Prepared(), null, SqlServerVersion.Sql160, new SchemaSyncOptions());
 
-        Assert.AreEqual(baseline, ModelHash.Compute(Prepared(), null, new SchemaSyncOptions { LockTimeout = TimeSpan.FromMinutes(9), CommandTimeout = TimeSpan.FromMinutes(9), IncludeDeploymentScript = true }));
-        Assert.AreEqual(baseline, ModelHash.Compute(Prepared(), null, new SchemaSyncOptions().AfterDeploy((_, _) => Task.CompletedTask)), "hooks run on every start anyway");
+        Assert.AreEqual(baseline, ModelHash.Compute(Prepared(), null, SqlServerVersion.Sql160, new SchemaSyncOptions { LockTimeout = TimeSpan.FromMinutes(9), CommandTimeout = TimeSpan.FromMinutes(9), IncludeDeploymentScript = true }));
+        Assert.AreEqual(baseline, ModelHash.Compute(Prepared(), null, SqlServerVersion.Sql160, new SchemaSyncOptions().AfterDeploy((_, _) => Task.CompletedTask)), "hooks run on every start anyway");
     }
 
     [TestMethod]
@@ -106,5 +107,16 @@ public sealed class FastPathTests
 
         Assert.IsTrue(skipped.ComparisonSkipped);
         StringAssert.StartsWith(skipped.Describe(), "Schema is current (unchanged since the last deployment; comparison skipped)");
+    }
+
+    private static SchemaSyncOptions ManagedSchemas(params string[] schemas)
+    {
+        var options = new SchemaSyncOptions();
+        foreach (var schema in schemas)
+        {
+            options.ManagedSchemas.Add(schema);
+        }
+
+        return options;
     }
 }

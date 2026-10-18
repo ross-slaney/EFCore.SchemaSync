@@ -17,7 +17,7 @@ internal static class ModelHash
         ?? typeof(ModelHash).Assembly.GetName().Version?.ToString()
         ?? "unknown";
 
-    public static string Compute(PreparedSchema prepared, string? collation, SchemaSyncOptions options)
+    public static string Compute(PreparedSchema prepared, string? collation, Microsoft.SqlServer.Dac.Model.SqlServerVersion platform, SchemaSyncOptions options)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         void Add(string? value)
@@ -30,7 +30,7 @@ internal static class ModelHash
         Add("EFCore.SchemaSync model hash v1");
         Add(LibraryVersion);
         Add(collation);
-        Add(options.TargetSqlServerVersion.ToString());
+        Add(platform.ToString());
         Add(options.AllowIncompatiblePlatform.ToString());
         Add(options.AllowDataLoss.ToString());
         Add(options.AllowObjectRemoval.ToString());

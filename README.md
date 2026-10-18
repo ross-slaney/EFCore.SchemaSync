@@ -43,6 +43,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Tracing and metrics](#tracing-and-metrics)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
+- [Supported platforms](#supported-platforms)
 - [Privacy: no telemetry](#privacy-no-telemetry)
 - [Supported mappings (tested)](#supported-mappings-tested)
 - [Limitations](#limitations)
@@ -75,8 +76,8 @@ no changes at all.
 
 ## Getting started
 
-Requirements: .NET 10, EF Core 10 (`Microsoft.EntityFrameworkCore.SqlServer`), SQL Server 2022 (tested; newer
-engines are accepted, older ones need `AllowIncompatiblePlatform`). The target database must already exist; the
+Requirements: .NET 10, EF Core 10 (`Microsoft.EntityFrameworkCore.SqlServer`), SQL Server 2022 or 2025 (both
+tested in CI; see [Supported platforms](#supported-platforms)). The target database must already exist; the
 library never creates databases.
 
 ```bash
@@ -181,7 +182,7 @@ Every default is the safe one. `SchemaSyncOptions`:
 | `ReportRetainedObjects` | `true` | Run the extra comparison that lists preserved target-only objects. |
 | `UseTransaction` | `true` | Transactional deployment script (`SET XACT_ABORT ON`, one transaction). SQL Server cannot roll back every DDL statement, so this is best effort, not a universal guarantee. |
 | `IncludeDeploymentScript` | `false` | Also return the executed script on real deployments. Dry runs always return it. |
-| `TargetSqlServerVersion` | `Sql160` (SQL Server 2022) | DacFx target platform of the generated DACPAC. |
+| `TargetSqlServerVersion` | detected from the server | DacFx target platform of the generated DACPAC. Set it to pin a platform and skip detection. |
 | `AllowIncompatiblePlatform` | `false` | Let DacFx deploy to a different platform (for example Azure SQL Database with `SqlAzure`). |
 | `LockResourceName` | `EFCore.SchemaSync` | `sp_getapplock` resource name, scoped to the target database. |
 | `RefactorLog` | `null` | Explicit renames and schema moves applied in place (see below), after the ones derived from model annotations. |
@@ -242,7 +243,7 @@ Most starts change nothing, yet a full DacFx comparison reads the whole live sch
 which costs seconds (more on large databases). After every successful application the library therefore
 records two hashes in its own table, `dbo.__SchemaSyncState` (one row per DbContext):
 
-- a **model hash** over EF's create script, the refactor log, the database collation, the target platform,
+- a **model hash** over EF's create script, the refactor log, the database collation, the target platform (detected or pinned),
   the deployment-relevant options (`AllowDataLoss`, `AllowObjectRemoval`, `ReportRetainedObjects`,
   `UseTransaction`, platform settings) and the library version;
 - a **schema fingerprint** over the catalog views that describe everything DacFx compares: objects with their
@@ -529,6 +530,39 @@ options.BeforeDeploy("truncate long names", (hook, ct) =>
 The sample app seeds its `Inbox` list this way in
 [SampleSchema.cs](samples/SchemaSync.Sample/SampleSchema.cs), shared by web startup and `--apply-schema`.
 
+## Supported platforms
+
+The DACPAC targets the platform of the server it deploys to. The library reads `SERVERPROPERTY('EngineEdition')`
+and `SERVERPROPERTY('ProductMajorVersion')` over the deployment connection and picks the DacFx platform; the result
+reports it in `TargetPlatform` and the log says what was detected.
+
+| Server | DacFx platform | Status |
+| --- | --- | --- |
+| SQL Server 2025 | `Sql170` | Tested in CI (full integration suite) |
+| SQL Server 2022 | `Sql160` | Tested in CI (full integration suite) |
+| SQL Server 2012 to 2019 | `Sql110` to `Sql150` | Mapped, not tested |
+| Azure SQL Database | `SqlAzure` | Opt-in tests (below) |
+| Azure SQL Managed Instance | `Sql160` | Mapped, not tested |
+| Azure SQL Edge | `Sql150` | Mapped, not tested |
+| Azure Synapse, Fabric warehouse, SQL database in Fabric | | Rejected with an explanation |
+
+Set `TargetSqlServerVersion` to skip detection, for example to build for an older engine than the one you deploy
+to. A pinned platform newer than the engine is refused by DacFx unless `AllowIncompatiblePlatform` is set. Model
+conversion always uses the newest T-SQL parser, so SQL Server 2025 types such as `json` and `vector` parse.
+
+**Running the suite against another engine.** The test app host reads `SCHEMASYNC_SQL_IMAGE_TAG`:
+
+```bash
+SCHEMASYNC_SQL_IMAGE_TAG=2025-latest dotnet test tests/EFCore.SchemaSync.IntegrationTests
+```
+
+**Azure SQL Database.** The `AzureSql` test category runs only when `SCHEMASYNC_AZURE_SQL_CONNECTION_STRING` points
+at a disposable database (each test works in its own schema and drops it), and the Entra ID test additionally
+needs `SCHEMASYNC_AZURE_SQL_ACCESS_TOKEN`. Without them the tests report Inconclusive. In CI the `azure-sql` job
+does the same from repository secrets (`SCHEMASYNC_AZURE_SQL_CONNECTION_STRING`, and `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` for OIDC login to fetch the token) and skips when they are missing.
+Entra ID access tokens set on the DbContext's `SqlConnection` are forwarded to DacFx.
+
 ## Privacy: no telemetry
 
 EFCore.SchemaSync sends nothing anywhere. DacFx, which it uses for comparison and deployment, contains an
@@ -589,8 +623,8 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
   certain `ALTER DATABASE` statements) cannot be rolled back by SQL Server. The dry-run script shows exactly what runs.
 - **The deployment script is SQLCMD-mode T-SQL** (`:setvar`, `:on error exit`). Run it with `sqlcmd` or SSMS in
   SQLCMD mode if you execute it by hand.
-- **Azure SQL Database and SQL Server 2019 and earlier are not tested.** Set `TargetSqlServerVersion` and, if DacFx
-  objects, `AllowIncompatiblePlatform`.
+- **Azure SQL Database, Managed Instance and SQL Server 2019 and earlier are not tested in CI.** The Azure SQL
+  Database tests exist but run only when configured (see [Supported platforms](#supported-platforms)).
 - **Startup cost.** When something changed, converting the model and running the DacFx comparison takes a few
   seconds (two comparisons when `ReportRetainedObjects` is on). Unchanged restarts skip it (see
   [Fast restarts](#fast-restarts)). DacFx brings a number of transitive package dependencies.

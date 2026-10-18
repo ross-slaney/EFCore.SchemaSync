@@ -4,6 +4,7 @@ using EFCore.SchemaSync.Deployment;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.SqlServer.Dac.Model;
 
 namespace EFCore.SchemaSync;
 
@@ -52,10 +53,21 @@ internal static class SchemaSynchronizer
         // 2. Connect. This connection owns the schema lock for the rest of the operation.
         SqlConnection connection;
         string? collation;
+        SqlServerVersion platform;
         using (var stage = run.StartStage("Connect"))
         {
             connection = await target.OpenAsync(cancellationToken).ConfigureAwait(false);
-            collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+                platform = options.TargetSqlServerVersion ?? await DetectPlatformAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+
             stage.Succeed();
         }
 
@@ -65,7 +77,7 @@ internal static class SchemaSynchronizer
         var convertStage = run.StartStage("Convert");
         var prepared = SchemaConverter.Prepare(context, new SchemaConversionOptions
         {
-            TargetSqlServerVersion = options.TargetSqlServerVersion,
+            TargetSqlServerVersion = platform,
             Collation = collation,
             PackageName = contextName,
             RefactorLog = options.RefactorLog,
@@ -75,7 +87,7 @@ internal static class SchemaSynchronizer
         // exactly what a previous full comparison produced); ordinary dry runs always compare.
         var readState = options.SkipComparisonWhenUnchanged && options.ConfigureDeployOptions is null && (!options.DryRun || options.VerifyOnly);
         var writeState = readState && !options.DryRun;
-        var modelHash = readState ? ModelHash.Compute(prepared, collation, options) : null;
+        var modelHash = readState ? ModelHash.Compute(prepared, collation, platform, options) : null;
         convertStage.Succeed();
         convertStage.Dispose();
         cancellationToken.ThrowIfCancellationRequested();
@@ -112,10 +124,10 @@ internal static class SchemaSynchronizer
                     if (options.DryRun)
                     {
                         return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
-                            [], state.RetainedObjects, [], warnings, deploymentScript: null, stopwatch.Elapsed, comparisonSkipped: true);
+                            [], state.RetainedObjects, [], warnings, deploymentScript: null, stopwatch.Elapsed, comparisonSkipped: true, targetPlatform: platform);
                     }
 
-                    return await FinishWithoutChangesAsync(context, options, services, target, logger, contextName, state.RetainedObjects, warnings, stopwatch, run, cancellationToken).ConfigureAwait(false);
+                    return await FinishWithoutChangesAsync(context, options, services, target, logger, contextName, state.RetainedObjects, warnings, stopwatch, platform, run, cancellationToken).ConfigureAwait(false);
                 }
 
                 logger.LogDebug("EFCore.SchemaSync: the schema of {Database} changed since the last deployment; running the full comparison.", target.DatabaseName);
@@ -235,7 +247,7 @@ internal static class SchemaSynchronizer
                 ? null
                 : await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
             return new SchemaSyncResult(changes.Count == 0 ? SchemaSyncOutcome.NoChangesNeeded : SchemaSyncOutcome.Previewed,
-                contextName, target.ServerName, target.DatabaseName, changes, retained, dataIssues, warnings, preview, stopwatch.Elapsed, renameHints: renameHints);
+                contextName, target.ServerName, target.DatabaseName, changes, retained, dataIssues, warnings, preview, stopwatch.Elapsed, renameHints: renameHints, targetPlatform: platform);
         }
 
         var executedHooks = new List<string>();
@@ -281,11 +293,11 @@ internal static class SchemaSynchronizer
 
         // 12. After-deploy hooks (schema matches the model, lock held).
         var applied = new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), renameHints: renameHints);
+            changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), renameHints: renameHints, targetPlatform: platform);
         await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, changes, applied, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
 
         return new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, renameHints: renameHints);
+            changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, renameHints: renameHints, targetPlatform: platform);
     }
 
     /// <summary>The fast path's end: no DacFx, but hooks still run (they run on every real application).</summary>
@@ -299,16 +311,17 @@ internal static class SchemaSynchronizer
         IReadOnlyList<SchemaObjectReference> retained,
         List<string> warnings,
         Stopwatch stopwatch,
+        SqlServerVersion platform,
         SchemaSyncRun run,
         CancellationToken cancellationToken)
     {
         var executedHooks = new List<string>();
         await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, [], result: null, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
         var current = new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
-            [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks.ToArray(), comparisonSkipped: true);
+            [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks.ToArray(), comparisonSkipped: true, targetPlatform: platform);
         await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, [], current, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
         return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
-            [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks, comparisonSkipped: true);
+            [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks, comparisonSkipped: true, targetPlatform: platform);
     }
 
     private static async Task RunHooksAsync(
@@ -476,6 +489,14 @@ internal static class SchemaSynchronizer
             logger.LogDebug(ex, "EFCore.SchemaSync: could not look for undeclared renames.");
             return [];
         }
+    }
+
+    private static async Task<SqlServerVersion> DetectPlatformAsync(SqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        var server = await TargetPlatform.ReadAsync(connection, cancellationToken).ConfigureAwait(false);
+        var platform = TargetPlatform.Resolve(server);
+        logger.LogInformation("EFCore.SchemaSync: targeting {Platform} (detected {Server}).", platform, TargetPlatform.Describe(server));
+        return platform;
     }
 
     private static async Task<string?> ReadDatabaseCollationAsync(SqlConnection connection, ILogger logger, CancellationToken cancellationToken)
