@@ -38,6 +38,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
+- [Privacy: no telemetry](#privacy-no-telemetry)
 - [Supported mappings (tested)](#supported-mappings-tested)
 - [Limitations](#limitations)
 - [Sample application and Aspire](#sample-application-and-aspire)
@@ -368,6 +369,18 @@ options.BeforeDeploy("truncate long names", (hook, ct) =>
 
 The sample app seeds its `Inbox` list this way in
 [SampleSchema.cs](samples/SchemaSync.Sample/SampleSchema.cs), shared by web startup and `--apply-schema`.
+
+## Privacy: no telemetry
+
+EFCore.SchemaSync sends nothing anywhere. DacFx, which it uses for comparison and deployment, contains an
+Application Insights client, but in the DacFx version this package references (170.5.96) that client only starts
+after an application calls `Microsoft.SqlServer.Dac.DacServices.EnableTelemetry(...)`. The library never calls it.
+
+This was verified against SQL Server: after real deployments DacFx's telemetry session is still unconfigured
+and no request reaches Application Insights. The integration suite repeats both checks on every run, so a
+DacFx upgrade that changed the default would fail CI before it ships. If your own application enables DacFx
+telemetry, deployments made through this library are included in it like any other DacFx operation; call
+`DacServices.DisableTelemetry()` to turn it off again.
 
 ## Supported mappings (tested)
 
