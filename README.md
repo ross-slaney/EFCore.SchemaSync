@@ -37,6 +37,7 @@ files, model snapshots, SQL scripts, SQL projects, extra CLI tools, or scratch d
 - [Defaults and options](#defaults-and-options)
 - [Results and errors](#results-and-errors)
 - [Concurrency: the schema lock](#concurrency-the-schema-lock)
+- [Fast restarts](#fast-restarts)
 - [Renames and schema moves (refactor log)](#renames-and-schema-moves-refactor-log)
 - [Deploy hooks: C# instead of pre/post-deployment scripts](#deploy-hooks-c-instead-of-prepost-deployment-scripts)
 - [Privacy: no telemetry](#privacy-no-telemetry)
@@ -172,6 +173,7 @@ Every default is the safe one. `SchemaSyncOptions`:
 | `LongRunningCommandTimeout` | same as `CommandTimeout` | DacFx timeout for long-running statements such as index builds. |
 | `AllowObjectRemoval` | `false` | Drop target-only objects (see above). Security objects are never dropped. |
 | `AllowDataLoss` | `false` | Permit changes DacFx flags as potentially lossy. |
+| `SkipComparisonWhenUnchanged` | `true` | Skip DacFx entirely when the model and the schema are unchanged since the last successful application (see [Fast restarts](#fast-restarts)). |
 | `ReportRetainedObjects` | `true` | Run the extra comparison that lists preserved target-only objects. |
 | `UseTransaction` | `true` | Transactional deployment script (`SET XACT_ABORT ON`, one transaction). SQL Server cannot roll back every DDL statement, so this is best effort, not a universal guarantee. |
 | `IncludeDeploymentScript` | `false` | Also return the executed script on real deployments. Dry runs always return it. |
@@ -204,6 +206,7 @@ plus `IgnorePermissions`, `IgnoreRoleMembership`, `IgnoreUserSettingsObjects`, `
 | `Warnings` | Conversion and comparison warnings, for example skipped seed data. |
 | `DeploymentScript` | The SQLCMD-mode script (dry runs, or `IncludeDeploymentScript`). |
 | `ExecutedHooks` | Names of the hooks that ran, in order. Empty on dry runs. |
+| `ComparisonSkipped` | True when nothing changed since the last application, so DacFx was not invoked. |
 | `RenameHints` | Changes that look like undeclared renames, with the `WasRenamedFrom` line that declares each one. |
 | `ContextName`, `ServerName`, `DatabaseName`, `Duration` | What was applied where, and how long it took including the lock wait. |
 | `Describe()` | Multi-line summary for logs and consoles. |
@@ -228,6 +231,34 @@ Before comparing, the library takes an exclusive `sp_getapplock` (`@LockOwner = 
 deployment has finished or failed. Other instances wait up to `LockTimeout`, then throw. Because the lock is owned by
 the session, it is released even if the process dies mid-deployment: the server releases it when the connection goes
 away. Instances that waited find no differences left and return `NoChangesNeeded`.
+
+## Fast restarts
+
+Most starts change nothing, yet a full DacFx comparison reads the whole live schema and builds a model of it,
+which costs seconds (more on large databases). After every successful application the library therefore
+records two hashes in its own table, `dbo.__SchemaSyncState` (one row per DbContext):
+
+- a **model hash** over EF's create script, the refactor log, the database collation, the target platform,
+  the deployment-relevant options (`AllowDataLoss`, `AllowObjectRemoval`, `ReportRetainedObjects`,
+  `UseTransaction`, platform settings) and the library version;
+- a **schema fingerprint** over the catalog views that describe everything DacFx compares: objects with their
+  modify dates, columns, computed columns, defaults, check constraints, indexes and index columns, foreign
+  keys, identity settings, sequences, module text, extended properties, temporal settings, user types and
+  synonyms.
+
+On the next start, under the schema lock, both are recomputed. If they match, DacFx is not loaded at all, the
+result is `NoChangesNeeded` with `ComparisonSkipped = true`, and `RetainedObjects`/`Warnings` are the ones
+recorded last time. Hooks still run.
+
+Anything else runs the full comparison: a model change, an option change, a library upgrade, or any DDL against
+the database by anyone (an added index, a dropped default, a new view, `sp_rename`, an extended property).
+Data changes do not. Dry runs always compare, and so does every start while `ConfigureDeployOptions` is set,
+because the effect of a callback cannot be hashed.
+
+The state table is part of every deployed model: it never appears in `Changes` or `RetainedObjects` and
+`AllowObjectRemoval` never drops it. Writing it needs `INSERT`/`UPDATE` on it (granted by `db_datawriter` or
+`db_owner`); if the deploying principal lacks that, the library logs a warning and simply compares in full on
+every start. Set `SkipComparisonWhenUnchanged = false` to turn the fast path off.
 
 ## Renames and schema moves (refactor log)
 
@@ -459,8 +490,9 @@ Explicitly rejected (`UnsupportedSchemaException`, before anything is executed):
   SQLCMD mode if you execute it by hand.
 - **Azure SQL Database and SQL Server 2019 and earlier are not tested.** Set `TargetSqlServerVersion` and, if DacFx
   objects, `AllowIncompatiblePlatform`.
-- **Startup cost.** Converting the model and running the DacFx comparison takes a few seconds (two comparisons when
-  `ReportRetainedObjects` is on). DacFx brings a number of transitive package dependencies.
+- **Startup cost.** When something changed, converting the model and running the DacFx comparison takes a few
+  seconds (two comparisons when `ReportRetainedObjects` is on). Unchanged restarts skip it (see
+  [Fast restarts](#fast-restarts)). DacFx brings a number of transitive package dependencies.
 
 ## Sample application and Aspire
 
