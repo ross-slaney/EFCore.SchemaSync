@@ -1,5 +1,8 @@
 using EFCore.SchemaSync;
 using Microsoft.EntityFrameworkCore;
+using OpenTelemetry;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 using SchemaSync.Sample;
 
 // Our own flags are stripped so the host's command-line configuration provider never sees them.
@@ -10,7 +13,17 @@ var connectionString = builder.Configuration.GetConnectionString("sampledb")
     ?? throw new InvalidOperationException("Connection string 'sampledb' is not configured. Run the app through SchemaSync.Sample.AppHost or set ConnectionStrings__sampledb.");
 
 builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlServer(connectionString));
-builder.Services.AddHealthChecks();
+builder.Services.AddHealthChecks()
+    .AddSchemaSyncHealthCheck<AppDbContext>(configure: o => o.Configure = SampleSchema.Configure);
+
+// Traces and metrics of every schema application. Aspire sets OTEL_EXPORTER_OTLP_ENDPOINT, so they show up in its dashboard.
+var otel = builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddSource(SchemaSyncTelemetry.SourceName))
+    .WithMetrics(metrics => metrics.AddMeter(SchemaSyncTelemetry.MeterName));
+if (!string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]))
+{
+    otel.UseOtlpExporter();
+}
 
 var app = builder.Build();
 

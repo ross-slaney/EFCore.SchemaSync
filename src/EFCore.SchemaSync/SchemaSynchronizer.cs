@@ -19,26 +19,63 @@ internal static class SchemaSynchronizer
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(options);
+        using var run = SchemaSyncRun.Start(context.GetType().Name, options.DryRun);
+        try
+        {
+            var result = await ApplyCoreAsync(context, options, logger, services, run, cancellationToken).ConfigureAwait(false);
+            run.Complete(result);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            run.Fail(ex);
+            throw;
+        }
+    }
+
+    private static async Task<SchemaSyncResult> ApplyCoreAsync(DbContext context, SchemaSyncOptions options, ILogger logger, IServiceProvider? services, SchemaSyncRun run, CancellationToken cancellationToken)
+    {
         options.Validate();
 
         var stopwatch = Stopwatch.StartNew();
         var contextName = context.GetType().Name;
+        var contextKey = context.GetType().FullName ?? contextName;
         var warnings = new List<string>();
         cancellationToken.ThrowIfCancellationRequested();
 
         // 1. Resolve the target (provider check, connection string, database name).
         var target = TargetConnection.Resolve(context, options);
+        run.SetTarget(target);
         logger.LogInformation(
             "EFCore.SchemaSync: applying the model of {Context} to {Server}/{Database}{Mode}.",
             contextName, target.ServerName, target.DatabaseName, options.DryRun ? " (dry run)" : string.Empty);
 
         // 2. Connect. This connection owns the schema lock for the rest of the operation.
-        await using var connection = await target.OpenAsync(cancellationToken).ConfigureAwait(false);
-        var collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
-        var platform = options.TargetSqlServerVersion ?? await DetectPlatformAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+        SqlConnection connection;
+        string? collation;
+        SqlServerVersion platform;
+        using (var stage = run.StartStage("Connect"))
+        {
+            connection = await target.OpenAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                collation = await ReadDatabaseCollationAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+                platform = options.TargetSqlServerVersion ?? await DetectPlatformAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
 
-        // 3. Convert the EF model into a validated DACPAC (no database access).
-        var package = SchemaConverter.Convert(context, new SchemaConversionOptions
+            stage.Succeed();
+        }
+
+        await using var connectionLifetime = connection;
+
+        // 3. Prepare the model: EF's create script and the refactor log. The DACPAC is only built when it is needed.
+        var convertStage = run.StartStage("Convert");
+        var prepared = SchemaConverter.Prepare(context, new SchemaConversionOptions
         {
             TargetSqlServerVersion = platform,
             Collation = collation,
@@ -46,10 +83,65 @@ internal static class SchemaSynchronizer
             RefactorLog = options.RefactorLog,
             RefactorLogPath = options.RefactorLogPath,
         });
+        // Real applications read and write the recorded state; verification reads it (a match proves the schema is
+        // exactly what a previous full comparison produced); ordinary dry runs always compare.
+        var readState = options.SkipComparisonWhenUnchanged && options.ConfigureDeployOptions is null && (!options.DryRun || options.VerifyOnly);
+        var writeState = readState && !options.DryRun;
+        var modelHash = readState ? ModelHash.Compute(prepared, collation, platform, options) : null;
+        convertStage.Succeed();
+        convertStage.Dispose();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // 4. Serialize comparison and deployment across instances.
+        SchemaLock acquiredLock;
+        using (var stage = run.StartStage("AcquireLock"))
+        {
+            acquiredLock = await SchemaLock.AcquireAsync(connection, options.LockResourceName, options.LockTimeout, logger, cancellationToken).ConfigureAwait(false);
+            stage.Succeed();
+            SchemaSyncTelemetry.LockWait.Record(stage.Elapsed.TotalSeconds, run.Tags());
+        }
+
+        await using var schemaLock = acquiredLock;
+
+        // The Compare stage spans the fast-path check, the DACPAC build and the DacFx comparison.
+        using var compareStage = run.StartStage("Compare");
+
+        // 5. Fast path: nothing changed since the last successful application.
+        if (readState)
+        {
+            var state = await SchemaState.TryReadAsync(connection, contextKey, logger, cancellationToken).ConfigureAwait(false);
+            if (state is not null && string.Equals(state.ModelHash, modelHash, StringComparison.Ordinal))
+            {
+                var fingerprint = await SchemaFingerprint.TryComputeAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+                if (fingerprint is not null && string.Equals(state.SchemaFingerprint, fingerprint, StringComparison.Ordinal))
+                {
+                    logger.LogInformation(
+                        "EFCore.SchemaSync: the model of {Context} and the schema of {Database} are unchanged since the last deployment; no changes needed (comparison skipped).",
+                        contextName, target.DatabaseName);
+                    warnings.AddRange(state.Warnings);
+                    compareStage.Succeed();
+                    compareStage.Dispose();
+                    if (options.DryRun)
+                    {
+                        return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
+                            [], state.RetainedObjects, [], warnings, deploymentScript: null, stopwatch.Elapsed, comparisonSkipped: true, targetPlatform: platform);
+                    }
+
+                    return await FinishWithoutChangesAsync(context, options, services, target, logger, contextName, state.RetainedObjects, warnings, stopwatch, platform, run, cancellationToken).ConfigureAwait(false);
+                }
+
+                logger.LogDebug("EFCore.SchemaSync: the schema of {Database} changed since the last deployment; running the full comparison.", target.DatabaseName);
+            }
+        }
+
+        // 6. Build the DACPAC (the library's state table is part of the model so DacFx never reports or drops it).
+        var includeState = options.SkipComparisonWhenUnchanged || await SchemaState.ExistsAsync(connection, cancellationToken).ConfigureAwait(false);
+        var package = prepared.Build(includeState ? [SchemaState.Statement] : null);
         warnings.AddRange(package.Warnings);
+        var userObjects = package.Objects.Where(o => !SchemaState.IsInternal(o.Name)).ToList();
         logger.LogInformation(
             "EFCore.SchemaSync: converted {Context} into a DACPAC with {ObjectCount} objects ({TableCount} tables).",
-            contextName, package.Objects.Count, package.Objects.Count(o => o.ObjectType == "Table"));
+            contextName, userObjects.Count, userObjects.Count(o => o.ObjectType == "Table"));
         foreach (var warning in package.Warnings)
         {
             logger.LogWarning("EFCore.SchemaSync: {Warning}", warning);
@@ -62,27 +154,52 @@ internal static class SchemaSynchronizer
                 package.RefactorOperations.Count, string.Join("; ", package.RefactorOperations.Select(o => o.ToString())));
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
+        // 7. Compare. Objects outside the context's scope (other schemas, tables excluded from migrations) are kept
+        //    out of every plan by the scope contributor.
+        var scope = DeploymentScope.Create(context, options);
+        using var scopeRegistration = scope.IsRestricted ? scope.Register() : null;
+        if (scopeRegistration is not null && DacDeployOptionsFactory.ContributorPath is null)
+        {
+            const string Problem = "the EFCore.SchemaSync assembly has no file path (single-file publish), so DacFx cannot load the scope contributor that keeps objects outside ManagedSchemas and tables excluded from migrations";
+            if (options.AllowObjectRemoval)
+            {
+                throw new SchemaSyncException(SchemaSyncStage.Compare, $"AllowObjectRemoval is refused because {Problem}. Publish without single-file bundling or turn AllowObjectRemoval off.");
+            }
 
-        // 4. Serialize comparison and deployment across instances.
-        await using var schemaLock = await SchemaLock.AcquireAsync(connection, options.LockResourceName, options.LockTimeout, logger, cancellationToken).ConfigureAwait(false);
+            warnings.Add($"Retained objects may include objects outside this context's scope because {Problem}.");
+        }
 
-        // 5. Compare.
+        var scopeToken = scopeRegistration is not null && DacDeployOptionsFactory.ContributorPath is not null ? scopeRegistration.Token : null;
         var deployer = new SchemaDeployer(target, logger);
-        var deployOptions = DacDeployOptionsFactory.Create(options);
+        var deployOptions = DacDeployOptionsFactory.Create(options, scopeToken);
         using var dacPackage = package.LoadDacPackage();
 
         var report = await deployer.GenerateReportAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
-        var dataIssues = report.DataIssues;
-        if (report.DataIssueDetails.Count > 0 && !options.AllowDataLoss && !options.DryRun)
+
+        var changes = report.Operations.Where(o => !SchemaState.IsInternal(o.ObjectName)).ToList();
+        var bookkeepingOnly = changes.Count == 0 && report.Operations.Count > 0;
+
+        // DacFx raises its data-loss alerts before contributors run: drop the ones about objects the scope kept.
+        var dataIssueDetails = report.DataIssueDetails
+            .Where(issue => !scope.Removed.Any(name => issue.Message.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var dataIssues = dataIssueDetails.Select(issue => issue.Message).ToList();
+        var renameHints = await FindRenameHintsAsync(connection, context, report, logger, cancellationToken).ConfigureAwait(false);
+        if (dataIssueDetails.Count > 0 && !options.AllowDataLoss && !options.DryRun)
         {
             // Same rule DacFx applies when it executes with BlockOnPossibleDataLoss: a lossy operation only matters
             // when the affected table holds rows. Checking here keeps the failure deterministic and before any DDL.
-            var blocking = await FindBlockingDataIssuesAsync(connection, report.DataIssueDetails, logger, cancellationToken).ConfigureAwait(false);
+            var blocking = await FindBlockingDataIssuesAsync(connection, dataIssueDetails, logger, cancellationToken).ConfigureAwait(false);
             if (blocking.Count > 0)
             {
-                throw new SchemaChangesBlockedException(blocking, report.Operations);
+                throw new SchemaChangesBlockedException(blocking, changes, renameHints);
             }
+        }
+
+        foreach (var hint in renameHints)
+        {
+            warnings.Add($"Possible undeclared rename {hint.OldName} -> {hint.NewName}. If it is one, declare it to keep the data: {hint.Suggestion}");
+            logger.LogWarning("EFCore.SchemaSync: possible undeclared rename {OldName} -> {NewName}. If it is one, declare it to keep the data: {Suggestion}", hint.OldName, hint.NewName, hint.Suggestion);
         }
 
         foreach (var alert in report.Alerts.Where(a => !string.Equals(a.Name, "DataIssue", StringComparison.OrdinalIgnoreCase)))
@@ -90,7 +207,7 @@ internal static class SchemaSynchronizer
             warnings.AddRange(alert.Issues.Select(issue => $"{alert.Name}: {issue}"));
         }
 
-        var retained = await ComputeRetainedObjectsAsync(deployer, dacPackage, options, report, warnings, cancellationToken).ConfigureAwait(false);
+        var retained = await ComputeRetainedObjectsAsync(deployer, dacPackage, options, scopeToken, report, warnings, cancellationToken).ConfigureAwait(false);
         if (retained.Count > 0)
         {
             logger.LogWarning(
@@ -103,8 +220,11 @@ internal static class SchemaSynchronizer
             logger.LogWarning("EFCore.SchemaSync: possible data loss: {Issue}", issue);
         }
 
-        // 6. Decide.
-        if (report.Operations.Count == 0)
+        compareStage.Succeed();
+        compareStage.Dispose();
+
+        // 8. Decide.
+        if (changes.Count == 0)
         {
             logger.LogInformation("EFCore.SchemaSync: {Database} already matches the model of {Context}; no changes needed.", target.DatabaseName, contextName);
         }
@@ -112,53 +232,96 @@ internal static class SchemaSynchronizer
         {
             logger.LogInformation(
                 "EFCore.SchemaSync: {Count} schema change(s) {Verb} for {Database}: {Changes}",
-                report.Operations.Count, options.DryRun ? "previewed" : "planned", target.DatabaseName,
-                string.Join("; ", report.Operations.Select(c => c.ToString())));
+                changes.Count, options.DryRun ? "previewed" : "planned", target.DatabaseName,
+                string.Join("; ", changes.Select(c => c.ToString())));
         }
 
         if (options.DryRun)
         {
-            if (options.Hooks.Count > 0)
+            if (options.Hooks.Count > 0 && !options.VerifyOnly)
             {
                 warnings.Add($"{options.Hooks.Count} hook(s) were not run because this is a dry run.");
             }
 
-            var preview = report.Operations.Count == 0
+            var preview = changes.Count == 0
                 ? null
                 : await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
-            return new SchemaSyncResult(report.Operations.Count == 0 ? SchemaSyncOutcome.NoChangesNeeded : SchemaSyncOutcome.Previewed,
-                contextName, target.ServerName, target.DatabaseName, report.Operations, retained, dataIssues, warnings, preview, stopwatch.Elapsed, targetPlatform: platform);
+            return new SchemaSyncResult(changes.Count == 0 ? SchemaSyncOutcome.NoChangesNeeded : SchemaSyncOutcome.Previewed,
+                contextName, target.ServerName, target.DatabaseName, changes, retained, dataIssues, warnings, preview, stopwatch.Elapsed, renameHints: renameHints, targetPlatform: platform);
         }
 
         var executedHooks = new List<string>();
 
-        // 7. Before-deploy hooks (old schema, lock held).
-        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, report.Operations, result: null, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+        // 9. Before-deploy hooks (old schema, lock held).
+        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, changes, result: null, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
 
         string? script = null;
         var outcome = SchemaSyncOutcome.NoChangesNeeded;
         if (report.Operations.Count > 0)
         {
-            if (options.IncludeDeploymentScript)
+            if (options.IncludeDeploymentScript && changes.Count > 0)
             {
                 script = await deployer.GenerateScriptAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
             }
 
-            // 8. Deploy.
-            await deployer.DeployAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
-            outcome = SchemaSyncOutcome.Applied;
-            logger.LogInformation(
-                "EFCore.SchemaSync: applied {Count} schema change(s) to {Server}/{Database} in {Elapsed:0.0}s.",
-                report.Operations.Count, target.ServerName, target.DatabaseName, stopwatch.Elapsed.TotalSeconds);
+            // 10. Deploy (a bookkeeping-only deployment just creates the state table; it is not reported as a change).
+            using (var stage = run.StartStage("Deploy", ("efcore.schemasync.changes", changes.Count)))
+            {
+                await deployer.DeployAsync(dacPackage, deployOptions, cancellationToken).ConfigureAwait(false);
+                stage.Succeed();
+            }
+
+            if (!bookkeepingOnly)
+            {
+                outcome = SchemaSyncOutcome.Applied;
+                logger.LogInformation(
+                    "EFCore.SchemaSync: applied {Count} schema change(s) to {Server}/{Database} in {Elapsed:0.0}s.",
+                    changes.Count, target.ServerName, target.DatabaseName, stopwatch.Elapsed.TotalSeconds);
+            }
         }
 
-        // 9. After-deploy hooks (schema matches the model, lock held).
+        // 11. Record the state for the next start's fast path (before the after-deploy hooks: DDL a hook performs is
+        //     then detected as a change next time instead of being taken as the expected schema).
+        if (writeState)
+        {
+            var fingerprint = await SchemaFingerprint.TryComputeAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            if (fingerprint is not null)
+            {
+                await SchemaState.TryWriteAsync(connection, contextKey, new SchemaState.Entry(modelHash!, fingerprint, retained, package.Warnings), logger, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        // 12. After-deploy hooks (schema matches the model, lock held).
         var applied = new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), platform);
-        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, report.Operations, applied, target, logger, executedHooks, cancellationToken).ConfigureAwait(false);
+            changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks.ToArray(), renameHints: renameHints, targetPlatform: platform);
+        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, changes, applied, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
 
         return new SchemaSyncResult(outcome, contextName, target.ServerName, target.DatabaseName,
-            report.Operations, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, platform);
+            changes, retained, dataIssues, warnings, script, stopwatch.Elapsed, executedHooks, renameHints: renameHints, targetPlatform: platform);
+    }
+
+    /// <summary>The fast path's end: no DacFx, but hooks still run (they run on every real application).</summary>
+    private static async Task<SchemaSyncResult> FinishWithoutChangesAsync(
+        DbContext context,
+        SchemaSyncOptions options,
+        IServiceProvider? services,
+        TargetConnection target,
+        ILogger logger,
+        string contextName,
+        IReadOnlyList<SchemaObjectReference> retained,
+        List<string> warnings,
+        Stopwatch stopwatch,
+        SqlServerVersion platform,
+        SchemaSyncRun run,
+        CancellationToken cancellationToken)
+    {
+        var executedHooks = new List<string>();
+        await RunHooksAsync(SchemaSyncHookPhase.BeforeDeploy, options, context, services, [], result: null, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
+        var current = new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
+            [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks.ToArray(), comparisonSkipped: true, targetPlatform: platform);
+        await RunHooksAsync(SchemaSyncHookPhase.AfterDeploy, options, context, services, [], current, target, logger, executedHooks, run, cancellationToken).ConfigureAwait(false);
+        return new SchemaSyncResult(SchemaSyncOutcome.NoChangesNeeded, contextName, target.ServerName, target.DatabaseName,
+            [], retained, [], warnings, deploymentScript: null, stopwatch.Elapsed, executedHooks, comparisonSkipped: true, targetPlatform: platform);
     }
 
     private static async Task RunHooksAsync(
@@ -171,6 +334,7 @@ internal static class SchemaSynchronizer
         TargetConnection target,
         ILogger logger,
         List<string> executed,
+        SchemaSyncRun run,
         CancellationToken cancellationToken)
     {
         var hooks = options.Hooks.Where(h => h.Phase == phase).ToList();
@@ -185,9 +349,11 @@ internal static class SchemaSynchronizer
             cancellationToken.ThrowIfCancellationRequested();
             var started = Stopwatch.StartNew();
             logger.LogInformation("EFCore.SchemaSync: running {Phase} hook '{Hook}'.", phase, hook.Name);
+            using var hookStage = run.StartStage("Hook", (SchemaSyncTelemetry.HookTag, hook.Name), (SchemaSyncTelemetry.HookPhaseTag, phase.ToString()));
             try
             {
                 await hook.Callback(hookContext, cancellationToken).ConfigureAwait(false);
+                hookStage.Succeed();
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -207,7 +373,7 @@ internal static class SchemaSynchronizer
     }
 
     private static async Task<IReadOnlyList<SchemaObjectReference>> ComputeRetainedObjectsAsync(
-        SchemaDeployer deployer, Microsoft.SqlServer.Dac.DacPackage dacPackage, SchemaSyncOptions options, DeployReport effectiveReport, List<string> warnings, CancellationToken cancellationToken)
+        SchemaDeployer deployer, Microsoft.SqlServer.Dac.DacPackage dacPackage, SchemaSyncOptions options, string? scopeToken, DeployReport effectiveReport, List<string> warnings, CancellationToken cancellationToken)
     {
         if (!options.ReportRetainedObjects || options.AllowObjectRemoval)
         {
@@ -216,7 +382,7 @@ internal static class SchemaSynchronizer
 
         try
         {
-            var dropEverything = DacDeployOptionsFactory.CreateForRetainedObjectsReport(options);
+            var dropEverything = DacDeployOptionsFactory.CreateForRetainedObjectsReport(options, scopeToken);
             var dropReport = await deployer.GenerateReportAsync(dacPackage, dropEverything, cancellationToken).ConfigureAwait(false);
             var plannedDrops = effectiveReport.Operations
                 .Where(c => c.Kind == SchemaChangeKind.Drop)
@@ -224,7 +390,7 @@ internal static class SchemaSynchronizer
                 .ToHashSet();
 
             return dropReport.Operations
-                .Where(c => c.Kind == SchemaChangeKind.Drop && !plannedDrops.Contains((c.ObjectType, c.ObjectName)))
+                .Where(c => c.Kind == SchemaChangeKind.Drop && !plannedDrops.Contains((c.ObjectType, c.ObjectName)) && !SchemaState.IsInternal(c.ObjectName))
                 .Select(c => new SchemaObjectReference(c.ObjectType, c.ObjectName))
                 .Distinct()
                 .ToArray();
@@ -297,6 +463,31 @@ internal static class SchemaSynchronizer
         catch (SqlException)
         {
             return true; // cannot prove the table is empty: stay on the safe side
+        }
+    }
+
+    /// <summary>
+    /// Looks for undeclared renames, but only when the plan could contain one: a lossy change (dropped column) or a new
+    /// table. Hints are advisory, so any failure here is logged and ignored.
+    /// </summary>
+    private static async Task<IReadOnlyList<RenameHint>> FindRenameHintsAsync(SqlConnection connection, DbContext context, DeployReport report, ILogger logger, CancellationToken cancellationToken)
+    {
+        var createsTable = report.Operations.Any(o => o.Kind == SchemaChangeKind.Create && o.ObjectType == "Table");
+        if (report.DataIssueDetails.Count == 0 && !createsTable)
+        {
+            return [];
+        }
+
+        try
+        {
+            var (deployed, known) = RenameHintAnalyzer.DescribeModel(context);
+            var target = await RenameHintAnalyzer.ReadTargetAsync(connection, cancellationToken).ConfigureAwait(false);
+            return RenameHintAnalyzer.Analyze(deployed, known, target);
+        }
+        catch (Exception ex) when (ex is SqlException or InvalidOperationException)
+        {
+            logger.LogDebug(ex, "EFCore.SchemaSync: could not look for undeclared renames.");
+            return [];
         }
     }
 

@@ -75,9 +75,13 @@ public sealed class SchemaSyncResult
         string? deploymentScript,
         TimeSpan duration,
         IReadOnlyList<string>? executedHooks = null,
+        bool comparisonSkipped = false,
+        IReadOnlyList<RenameHint>? renameHints = null,
         Microsoft.SqlServer.Dac.Model.SqlServerVersion? targetPlatform = null)
     {
         ExecutedHooks = executedHooks ?? [];
+        ComparisonSkipped = comparisonSkipped;
+        RenameHints = renameHints ?? [];
         TargetPlatform = targetPlatform;
         Outcome = outcome;
         ContextName = contextName;
@@ -133,6 +137,19 @@ public sealed class SchemaSyncResult
     /// <summary>Names of the hooks that ran, in order. Empty on dry runs.</summary>
     public IReadOnlyList<string> ExecutedHooks { get; }
 
+    /// <summary>
+    /// True when the model and the schema were unchanged since the last successful application, so DacFx was not
+    /// invoked (see <see cref="SchemaSyncOptions.SkipComparisonWhenUnchanged"/>). <see cref="RetainedObjects"/> and
+    /// <see cref="Warnings"/> are then those recorded by that application.
+    /// </summary>
+    public bool ComparisonSkipped { get; }
+
+    /// <summary>
+    /// Changes that look like undeclared renames (for example a new, empty table next to a retained table with the
+    /// same columns), with the configuration line that declares each one. Also listed in <see cref="Warnings"/>.
+    /// </summary>
+    public IReadOnlyList<RenameHint> RenameHints { get; }
+
     /// <summary>The DacFx platform the DACPAC targeted: detected from the server unless <see cref="SchemaSyncOptions.TargetSqlServerVersion"/> was set.</summary>
     public Microsoft.SqlServer.Dac.Model.SqlServerVersion? TargetPlatform { get; }
 
@@ -145,6 +162,7 @@ public sealed class SchemaSyncResult
         var sb = new StringBuilder();
         sb.Append(Outcome switch
         {
+            SchemaSyncOutcome.NoChangesNeeded when ComparisonSkipped => "Schema is current (unchanged since the last deployment; comparison skipped)",
             SchemaSyncOutcome.NoChangesNeeded => "Schema is current",
             SchemaSyncOutcome.Previewed => $"Dry run: {Changes.Count} change(s) previewed",
             SchemaSyncOutcome.Applied => $"Applied {Changes.Count} change(s)",

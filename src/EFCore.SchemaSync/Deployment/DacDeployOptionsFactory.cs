@@ -51,7 +51,7 @@ internal static class DacDeployOptionsFactory
     /// <summary>
     /// Creates the options used for the real comparison and deployment.
     /// </summary>
-    public static DacDeployOptions Create(SchemaSyncOptions options)
+    public static DacDeployOptions Create(SchemaSyncOptions options, string? scopeToken = null)
     {
         var commandTimeout = ToSeconds(options.CommandTimeout);
         var deploy = new DacDeployOptions
@@ -125,6 +125,11 @@ internal static class DacDeployOptionsFactory
             DatabaseLockTimeout = 60,
         };
 
+        if (scopeToken is not null)
+        {
+            AttachScope(deploy, scopeToken);
+        }
+
         options.ConfigureDeployOptions?.Invoke(deploy);
         return deploy;
     }
@@ -133,9 +138,9 @@ internal static class DacDeployOptionsFactory
     /// Creates options that drop every target-only object DacFx manages, used only to *report* which objects
     /// the real deployment preserved. These options are never used to deploy.
     /// </summary>
-    public static DacDeployOptions CreateForRetainedObjectsReport(SchemaSyncOptions options)
+    public static DacDeployOptions CreateForRetainedObjectsReport(SchemaSyncOptions options, string? scopeToken = null)
     {
-        var report = Create(options);
+        var report = Create(options, scopeToken);
         report.DoNotDropObjectTypes = UnmanagedObjectTypes;
         report.BlockOnPossibleDataLoss = false;
         report.TreatVerificationErrorsAsWarnings = true;
@@ -145,6 +150,25 @@ internal static class DacDeployOptionsFactory
         report.DropDmlTriggersNotInSource = true;
         report.DropExtendedPropertiesNotInSource = true;
         return report;
+    }
+
+    /// <summary>The path DacFx loads <see cref="ScopeContributor"/> from, or null when the assembly has no file (single-file publish).</summary>
+    internal static string? ContributorPath
+    {
+        get
+        {
+            var location = typeof(ScopeContributor).Assembly.Location;
+            return string.IsNullOrEmpty(location) ? null : location;
+        }
+    }
+
+    /// <summary>Adds the scope contributor to the options, keeping any contributors already configured.</summary>
+    internal static void AttachScope(DacDeployOptions deploy, string scopeToken)
+    {
+        static string Append(string? existing, string value) => string.IsNullOrWhiteSpace(existing) ? value : existing + ";" + value;
+        deploy.AdditionalDeploymentContributors = Append(deploy.AdditionalDeploymentContributors, ScopeContributor.ContributorId);
+        deploy.AdditionalDeploymentContributorPaths = Append(deploy.AdditionalDeploymentContributorPaths, ContributorPath ?? string.Empty);
+        deploy.AdditionalDeploymentContributorArguments = Append(deploy.AdditionalDeploymentContributorArguments, $"{ScopeContributor.TokenArgument}={scopeToken}");
     }
 
     private static int ToSeconds(TimeSpan value)
